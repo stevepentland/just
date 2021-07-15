@@ -1,11 +1,8 @@
-use executable_path::executable_path;
-use std::{process, str};
-
-use test_utilities::tmptree;
+use crate::common::*;
 
 #[test]
 fn dotenv() {
-  let tmp = tmptree! {
+  let tmp = temptree! {
     ".env": "KEY=ROOT",
     sub: {
       ".env": "KEY=SUB",
@@ -15,7 +12,7 @@ fn dotenv() {
 
   let binary = executable_path("just");
 
-  let output = process::Command::new(binary)
+  let output = Command::new(binary)
     .current_dir(tmp.path())
     .arg("sub/default")
     .output()
@@ -37,7 +34,6 @@ test! {
   "#,
   stdout:   "undefined\n",
   stderr:   "if [ -n \"${DOTENV_KEY+1}\" ]; then echo defined; else echo undefined; fi\n",
-  dotenv_load: false,
 }
 
 test! {
@@ -50,7 +46,6 @@ test! {
   "#,
   stdout:   "dotenv-value\n",
   stderr:   "echo $DOTENV_KEY\n",
-  dotenv_load: false,
 }
 
 test! {
@@ -63,7 +58,6 @@ test! {
   "#,
   stdout:   "dotenv-value\n",
   stderr:   "echo $DOTENV_KEY\n",
-  dotenv_load: false,
 }
 
 // Un-comment this on 2021-07-01.
@@ -89,5 +83,4 @@ test! {
 //     See https://github.com/casey/just/issues/469 for more details.
 //     echo $DOTENV_KEY
 //   ",
-//   dotenv_load: false,
 // }

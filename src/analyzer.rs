@@ -29,6 +29,7 @@ impl<'src> Analyzer<'src> {
           self.analyze_assignment(&assignment)?;
           self.assignments.insert(assignment);
         },
+        Item::Comment(_) => (),
         Item::Recipe(recipe) => {
           self.analyze_recipe(&recipe)?;
           self.recipes.insert(recipe);
@@ -70,6 +71,9 @@ impl<'src> Analyzer<'src> {
         },
         Setting::Export(export) => {
           settings.export = export;
+        },
+        Setting::PositionalArguments(positional_arguments) => {
+          settings.positional_arguments = positional_arguments;
         },
         Setting::Shell(shell) => {
           assert!(settings.shell.is_none());

@@ -25,9 +25,11 @@ pub(crate) struct Config {
   pub(crate) search_config:        SearchConfig,
   pub(crate) shell:                String,
   pub(crate) shell_args:           Vec<String>,
+  pub(crate) shell_command:        bool,
   pub(crate) shell_present:        bool,
   pub(crate) subcommand:           Subcommand,
   pub(crate) unsorted:             bool,
+  pub(crate) unstable:             bool,
   pub(crate) verbosity:            Verbosity,
 }
 
@@ -37,19 +39,23 @@ mod cmd {
   pub(crate) const DUMP: &str = "DUMP";
   pub(crate) const EDIT: &str = "EDIT";
   pub(crate) const EVALUATE: &str = "EVALUATE";
+  pub(crate) const FORMAT: &str = "FORMAT";
   pub(crate) const INIT: &str = "INIT";
   pub(crate) const LIST: &str = "LIST";
   pub(crate) const SHOW: &str = "SHOW";
   pub(crate) const SUMMARY: &str = "SUMMARY";
   pub(crate) const VARIABLES: &str = "VARIABLES";
+  pub(crate) const COMMAND: &str = "COMMAND";
 
   pub(crate) const ALL: &[&str] = &[
     CHOOSE,
+    COMMAND,
     COMPLETIONS,
     DUMP,
     EDIT,
-    INIT,
     EVALUATE,
+    FORMAT,
+    INIT,
     LIST,
     SHOW,
     SUMMARY,
@@ -60,6 +66,7 @@ mod cmd {
     COMPLETIONS,
     DUMP,
     EDIT,
+    FORMAT,
     INIT,
     LIST,
     SHOW,
@@ -75,16 +82,18 @@ mod arg {
   pub(crate) const COLOR: &str = "COLOR";
   pub(crate) const DRY_RUN: &str = "DRY-RUN";
   pub(crate) const HIGHLIGHT: &str = "HIGHLIGHT";
+  pub(crate) const JUSTFILE: &str = "JUSTFILE";
   pub(crate) const LIST_HEADING: &str = "LIST-HEADING";
   pub(crate) const LIST_PREFIX: &str = "LIST-PREFIX";
-  pub(crate) const JUSTFILE: &str = "JUSTFILE";
   pub(crate) const NO_DOTENV: &str = "NO-DOTENV";
   pub(crate) const NO_HIGHLIGHT: &str = "NO-HIGHLIGHT";
   pub(crate) const QUIET: &str = "QUIET";
   pub(crate) const SET: &str = "SET";
   pub(crate) const SHELL: &str = "SHELL";
   pub(crate) const SHELL_ARG: &str = "SHELL-ARG";
+  pub(crate) const SHELL_COMMAND: &str = "SHELL-COMMAND";
   pub(crate) const UNSORTED: &str = "UNSORTED";
+  pub(crate) const UNSTABLE: &str = "UNSTABLE";
   pub(crate) const VERBOSE: &str = "VERBOSE";
   pub(crate) const WORKING_DIRECTORY: &str = "WORKING-DIRECTORY";
 
@@ -194,6 +203,12 @@ impl Config {
           .help("Invoke shell with <SHELL-ARG> as an argument"),
       )
       .arg(
+        Arg::with_name(arg::SHELL_COMMAND)
+          .long("shell-command")
+          .requires(cmd::COMMAND)
+          .help("Invoke <COMMAND> with the shell used to run recipe lines and backticks"),
+      )
+      .arg(
         Arg::with_name(arg::CLEAR_SHELL_ARGS)
           .long("clear-shell-args")
           .overrides_with(arg::SHELL_ARG)
@@ -204,6 +219,11 @@ impl Config {
           .long("unsorted")
           .short("u")
           .help("Return list and summary entries in source order"),
+      )
+      .arg(
+        Arg::with_name(arg::UNSTABLE)
+          .long("unstable")
+          .help("Enable unstable features"),
       )
       .arg(
         Arg::with_name(arg::VERBOSE)
@@ -220,12 +240,18 @@ impl Config {
           .help("Use <WORKING-DIRECTORY> as working directory. --justfile must also be set")
           .requires(arg::JUSTFILE),
       )
-      .arg(
-        Arg::with_name(arg::ARGUMENTS)
-          .multiple(true)
-          .help("Overrides and recipe(s) to run, defaulting to the first recipe in the justfile"),
-      )
       .arg(Arg::with_name(cmd::CHOOSE).long("choose").help(CHOOSE_HELP))
+      .arg(
+        Arg::with_name(cmd::COMMAND)
+          .long("command")
+          .short("c")
+          .min_values(1)
+          .allow_hyphen_values(true)
+          .help(
+            "Run an arbitrary command with the working directory, `.env`, overrides, and exports \
+             set",
+          ),
+      )
       .arg(
         Arg::with_name(cmd::COMPLETIONS)
           .long("completions")
@@ -247,9 +273,14 @@ impl Config {
           .help("Edit justfile with editor given by $VISUAL or $EDITOR, falling back to `vim`"),
       )
       .arg(Arg::with_name(cmd::EVALUATE).long("evaluate").help(
-        "Evaluate and print all variables. If positional arguments are present, only print the \
-         variables whose names are given as arguments.",
+        "Evaluate and print all variables. If a variable name is given as an argument, only print \
+         that variable's value.",
       ))
+      .arg(
+        Arg::with_name(cmd::FORMAT)
+          .long("fmt")
+          .help("Format and overwrite justfile"),
+      )
       .arg(
         Arg::with_name(cmd::INIT)
           .long("init")
@@ -279,7 +310,12 @@ impl Config {
           .long("variables")
           .help("List names of variables"),
       )
-      .group(ArgGroup::with_name("SUBCOMMAND").args(cmd::ALL));
+      .group(ArgGroup::with_name("SUBCOMMAND").args(cmd::ALL))
+      .arg(
+        Arg::with_name(arg::ARGUMENTS)
+          .multiple(true)
+          .help("Overrides and recipe(s) to run, defaulting to the first recipe in the justfile"),
+      );
 
     if cfg!(feature = "help4help2man") {
       app.version(env!("CARGO_PKG_VERSION")).about(concat!(
@@ -289,7 +325,7 @@ impl Config {
       ))
     } else {
       app
-        .version(concat!("v", env!("CARGO_PKG_VERSION")))
+        .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(concat!(
           env!("CARGO_PKG_DESCRIPTION"),
@@ -340,7 +376,7 @@ impl Config {
     let positional = Positional::from_values(matches.values_of(arg::ARGUMENTS));
 
     for (name, value) in positional.overrides {
-      overrides.insert(name.to_owned(), value.to_owned());
+      overrides.insert(name.clone(), value.clone());
     }
 
     let search_config = {
@@ -375,20 +411,20 @@ impl Config {
           (false, false) => {},
           (true, false) => {
             return Err(ConfigError::SubcommandOverrides {
-              subcommand: format!("--{}", subcommand.to_lowercase()),
+              subcommand,
               overrides,
             });
           },
           (false, true) => {
             return Err(ConfigError::SubcommandArguments {
-              subcommand: format!("--{}", subcommand.to_lowercase()),
-              arguments:  positional.arguments,
+              arguments: positional.arguments,
+              subcommand,
             });
           },
           (true, true) => {
             return Err(ConfigError::SubcommandOverridesAndArguments {
-              subcommand: format!("--{}", subcommand.to_lowercase()),
               arguments: positional.arguments,
+              subcommand,
               overrides,
             });
           },
@@ -401,6 +437,16 @@ impl Config {
         chooser: matches.value_of(arg::CHOOSER).map(str::to_owned),
         overrides,
       }
+    } else if let Some(values) = matches.values_of_os(cmd::COMMAND) {
+      let mut arguments = values
+        .into_iter()
+        .map(OsStr::to_owned)
+        .collect::<Vec<OsString>>();
+      Subcommand::Command {
+        binary: arguments.remove(0),
+        arguments,
+        overrides,
+      }
     } else if let Some(shell) = matches.value_of(cmd::COMPLETIONS) {
       Subcommand::Completions {
         shell: shell.to_owned(),
@@ -411,6 +457,8 @@ impl Config {
       Subcommand::Summary
     } else if matches.is_present(cmd::DUMP) {
       Subcommand::Dump
+    } else if matches.is_present(cmd::FORMAT) {
+      Subcommand::Format
     } else if matches.is_present(cmd::INIT) {
       Subcommand::Init
     } else if matches.is_present(cmd::LIST) {
@@ -420,8 +468,19 @@ impl Config {
         name: name.to_owned(),
       }
     } else if matches.is_present(cmd::EVALUATE) {
+      if positional.arguments.len() > 1 {
+        return Err(ConfigError::SubcommandArguments {
+          subcommand: cmd::EVALUATE,
+          arguments:  positional
+            .arguments
+            .into_iter()
+            .skip(1)
+            .collect::<Vec<String>>(),
+        });
+      }
+
       Subcommand::Evaluate {
-        variables: positional.arguments,
+        variable: positional.arguments.into_iter().next(),
         overrides,
       }
     } else if matches.is_present(cmd::VARIABLES) {
@@ -452,7 +511,9 @@ impl Config {
       highlight: !matches.is_present(arg::NO_HIGHLIGHT),
       shell: matches.value_of(arg::SHELL).unwrap().to_owned(),
       load_dotenv: !matches.is_present(arg::NO_DOTENV),
+      shell_command: matches.is_present(arg::SHELL_COMMAND),
       unsorted: matches.is_present(arg::UNSORTED),
+      unstable: matches.is_present(arg::UNSTABLE),
       list_heading: matches
         .value_of(arg::LIST_HEADING)
         .unwrap_or("Available recipes:\n")
@@ -496,7 +557,9 @@ impl Config {
       })
       .eprint(self.color)?;
 
-    let justfile = Compiler::compile(&src).eprint(self.color)?;
+    let tokens = Lexer::lex(&src).eprint(self.color)?;
+    let ast = Parser::parse(&tokens).eprint(self.color)?;
+    let justfile = Analyzer::analyze(ast.clone()).eprint(self.color)?;
 
     if self.verbosity.loud() {
       for warning in &justfile.warnings {
@@ -511,8 +574,10 @@ impl Config {
     match &self.subcommand {
       Choose { overrides, chooser } =>
         self.choose(justfile, &search, overrides, chooser.as_deref())?,
-      Dump => Self::dump(justfile),
+      Command { overrides, .. } => self.run(justfile, &search, overrides, &[])?,
+      Dump => Self::dump(ast)?,
       Evaluate { overrides, .. } => self.run(justfile, &search, overrides, &[])?,
+      Format => self.format(ast, &search)?,
       List => self.list(justfile),
       Run {
         arguments,
@@ -632,8 +697,9 @@ impl Config {
     self.run(justfile, search, overrides, &recipes)
   }
 
-  fn dump(justfile: Justfile) {
-    println!("{}", justfile);
+  fn dump(ast: Module) -> Result<(), i32> {
+    print!("{}", ast);
+    Ok(())
   }
 
   pub(crate) fn edit(&self, search: &Search) -> Result<(), i32> {
@@ -666,6 +732,32 @@ impl Config {
         }
         Err(EXIT_FAILURE)
       },
+    }
+  }
+
+  fn format(&self, ast: Module, search: &Search) -> Result<(), i32> {
+    if !self.unstable {
+      eprintln!(
+        "The `--fmt` command is currently unstable. Pass the `--unstable` flag to enable it."
+      );
+      return Err(EXIT_FAILURE);
+    }
+
+    if let Err(error) = File::create(&search.justfile).and_then(|mut file| write!(file, "{}", ast))
+    {
+      if self.verbosity.loud() {
+        eprintln!(
+          "Failed to write justfile to `{}`: {}",
+          search.justfile.display(),
+          error
+        );
+      }
+      Err(EXIT_FAILURE)
+    } else {
+      if self.verbosity.loud() {
+        eprintln!("Wrote justfile to `{}`", search.justfile.display());
+      }
+      Ok(())
     }
   }
 
@@ -787,7 +879,7 @@ impl Config {
     arguments: &[String],
   ) -> Result<(), i32> {
     if let Err(error) = InterruptHandler::install(self.verbosity) {
-      warn!("Failed to set CTRL-C handler: {}", error)
+      warn!("Failed to set CTRL-C handler: {}", error);
     }
 
     let result = justfile.run(&self, search, overrides, arguments);
@@ -811,7 +903,7 @@ impl Config {
     } else {
       if self.verbosity.loud() {
         eprintln!("Justfile does not contain recipe `{}`.", name);
-        if let Some(suggestion) = justfile.suggest(name) {
+        if let Some(suggestion) = justfile.suggest_recipe(name) {
           eprintln!("{}", suggestion);
         }
       }
@@ -840,7 +932,7 @@ impl Config {
       if i > 0 {
         print!(" ");
       }
-      print!("{}", assignment.name)
+      print!("{}", assignment.name);
     }
     println!();
   }
@@ -856,7 +948,7 @@ mod tests {
   // have proper tests for all the flags, but this will do for now.
   #[test]
   fn help() {
-    const EXPECTED_HELP: &str = "just v0.9.0
+    const EXPECTED_HELP: &str = "just 0.9.8
 Casey Rodarmor <casey@rodarmor.com>
 🤖 Just a command runner \
                                  - https://github.com/casey/just
@@ -873,17 +965,21 @@ FLAGS:
         --dump                Print entire justfile
     -e, --edit                Edit justfile with editor given by $VISUAL or $EDITOR, falling back \
                                  to `vim`
-        --evaluate            Evaluate and print all variables. If positional arguments are \
-                                 present, only print the
-                              variables whose names are given as arguments.
+        --evaluate            Evaluate and print all variables. If a variable name is given as an \
+                                 argument, only print
+                              that variable's value.
+        --fmt                 Format and overwrite justfile
         --highlight           Highlight echoed recipe lines in bold
         --init                Initialize new justfile in project root
     -l, --list                List available recipes and their arguments
         --no-dotenv           Don't load `.env` file
         --no-highlight        Don't highlight echoed recipe lines in bold
     -q, --quiet               Suppress all output
+        --shell-command       Invoke <COMMAND> with the shell used to run recipe lines and \
+                                 backticks
         --summary             List names of available recipes
     -u, --unsorted            Return list and summary entries in source order
+        --unstable            Enable unstable features
         --variables           List names of variables
     -v, --verbose             Use verbose output
 
@@ -891,6 +987,9 @@ OPTIONS:
         --chooser <CHOOSER>                        Override binary invoked by `--choose`
         --color <COLOR>
             Print colorful output [default: auto]  [possible values: auto, always, never]
+
+    -c, --command <COMMAND>
+            Run an arbitrary command with the working directory, `.env`, overrides, and exports set
 
         --completions <SHELL>
             Print shell completion script for <SHELL> [possible values: zsh, bash, fish, \
@@ -947,7 +1046,7 @@ ARGS:
           $(dry_run: $dry_run,)?
           $(highlight: $highlight,)?
           $(search_config: $search_config,)?
-          $(shell: $shell.to_string(),)?
+          $(shell: $shell.to_owned(),)?
           $(shell_args: $shell_args,)?
           $(shell_present: $shell_present,)?
           $(subcommand: $subcommand,)?
@@ -1267,6 +1366,11 @@ ARGS:
   }
 
   error! {
+    name: subcommand_conflict_fmt,
+    args: ["--list", "--fmt"],
+  }
+
+  error! {
     name: subcommand_conflict_init,
     args: ["--list", "--init"],
   }
@@ -1330,7 +1434,7 @@ ARGS:
     args: ["--evaluate"],
     subcommand: Subcommand::Evaluate {
       overrides: map!{},
-      variables: vec![],
+      variable: None,
     },
   }
 
@@ -1339,7 +1443,7 @@ ARGS:
     args: ["--evaluate", "x=y"],
     subcommand: Subcommand::Evaluate {
       overrides: map!{"x": "y"},
-      variables: vec![],
+      variable: None,
     },
   }
 
@@ -1348,7 +1452,7 @@ ARGS:
     args: ["--evaluate", "x=y", "foo"],
     subcommand: Subcommand::Evaluate {
       overrides: map!{"x": "y"},
-      variables: vec!["foo".to_owned()],
+      variable: Some("foo".to_owned()),
     },
   }
 
@@ -1400,7 +1504,7 @@ ARGS:
     name: arguments_leading_equals,
     args: ["=foo"],
     subcommand: Subcommand::Run {
-      arguments: vec!["=foo".to_string()],
+      arguments: vec!["=foo".to_owned()],
       overrides: map!{},
     },
   }
@@ -1577,7 +1681,7 @@ ARGS:
     args: ["--completions", "zsh", "foo"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--completions");
+      assert_eq!(subcommand, cmd::COMPLETIONS);
       assert_eq!(arguments, &["foo"]);
     },
   }
@@ -1587,7 +1691,7 @@ ARGS:
     args: ["--list", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--list");
+      assert_eq!(subcommand, cmd::LIST);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1597,7 +1701,7 @@ ARGS:
     args: ["--dump", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--dump");
+      assert_eq!(subcommand, cmd::DUMP);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1607,7 +1711,17 @@ ARGS:
     args: ["--edit", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--edit");
+      assert_eq!(subcommand, cmd::EDIT);
+      assert_eq!(arguments, &["bar"]);
+    },
+  }
+
+  error! {
+    name: fmt_arguments,
+    args: ["--fmt", "bar"],
+    error: ConfigError::SubcommandArguments { subcommand, arguments },
+    check: {
+      assert_eq!(subcommand, cmd::FORMAT);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1617,7 +1731,7 @@ ARGS:
     args: ["--init", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--init");
+      assert_eq!(subcommand, cmd::INIT);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1627,7 +1741,7 @@ ARGS:
     args: ["--show", "foo", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--show");
+      assert_eq!(subcommand, cmd::SHOW);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1637,7 +1751,7 @@ ARGS:
     args: ["--summary", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, "--summary");
+      assert_eq!(subcommand, cmd::SUMMARY);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1647,7 +1761,7 @@ ARGS:
     args: ["--summary", "bar=baz", "bar"],
     error: ConfigError::SubcommandOverridesAndArguments { subcommand, arguments, overrides },
     check: {
-      assert_eq!(subcommand, "--summary");
+      assert_eq!(subcommand, cmd::SUMMARY);
       assert_eq!(overrides, map!{"bar": "baz"});
       assert_eq!(arguments, &["bar"]);
     },
@@ -1658,7 +1772,7 @@ ARGS:
     args: ["--summary", "bar=baz"],
     error: ConfigError::SubcommandOverrides { subcommand, overrides },
     check: {
-      assert_eq!(subcommand, "--summary");
+      assert_eq!(subcommand, cmd::SUMMARY);
       assert_eq!(overrides, map!{"bar": "baz"});
     },
   }

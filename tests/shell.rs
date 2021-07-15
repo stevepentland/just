@@ -1,8 +1,4 @@
-use std::{process::Command, str};
-
-use executable_path::executable_path;
-
-use test_utilities::{assert_stdout, tmptree};
+use crate::common::*;
 
 const JUSTFILE: &str = "
 expression := `EXPRESSION`
@@ -17,7 +13,7 @@ recipe default=`DEFAULT`:
 #[test]
 #[cfg_attr(windows, ignore)]
 fn flag() {
-  let tmp = tmptree! {
+  let tmp = temptree! {
     justfile: JUSTFILE,
     shell: "#!/usr/bin/env bash\necho \"$@\"",
   };
@@ -56,7 +52,7 @@ recipe:
 #[test]
 #[cfg_attr(unix, ignore)]
 fn cmd() {
-  let tmp = tmptree! {
+  let tmp = temptree! {
     justfile: JUSTFILE_CMD,
   };
 
@@ -85,7 +81,7 @@ recipe:
 #[test]
 #[cfg_attr(unix, ignore)]
 fn powershell() {
-  let tmp = tmptree! {
+  let tmp = temptree! {
     justfile: JUSTFILE_POWERSHELL,
   };
 
@@ -139,7 +135,6 @@ test! {
   shell: false,
 }
 
-#[cfg(unix)]
 test! {
   name: set_shell,
   justfile: "
@@ -154,23 +149,5 @@ test! {
   args: (),
   stdout: "echo barecho foo",
   stderr: "echo bar\necho foo\n",
-  shell: false,
-}
-
-#[cfg(windows)]
-test! {
-  name: set_shell,
-  justfile: "
-    set shell := ['echo', '-n']
-
-    x := `bar`
-
-    foo:
-      echo {{x}}
-      echo foo
-  ",
-  args: (),
-  stdout: "-n echo -n bar\r\r\n-n echo foo\r\n",
-  stderr: "echo -n bar\r\necho foo\n",
   shell: false,
 }

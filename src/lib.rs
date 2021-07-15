@@ -2,8 +2,12 @@
 #![allow(
   clippy::blanket_clippy_restriction_lints,
   clippy::comparison_chain,
+  clippy::create_dir,
+  clippy::default_numeric_fallback,
   clippy::else_if_without_else,
   clippy::enum_glob_use,
+  clippy::exhaustive_enums,
+  clippy::exhaustive_structs,
   clippy::expect_used,
   clippy::filter_map,
   clippy::if_not_else,
@@ -139,5 +143,8 @@ pub use crate::run::run;
 #[doc(hidden)]
 pub use unindent::unindent;
 
-#[cfg(feature = "summary")]
+// Used by Janus, https://github.com/casey/janus, a tool
+// that analyses all public justfiles on GitHub to avoid
+// breaking changes.
+#[doc(hidden)]
 pub mod summary;

@@ -296,17 +296,34 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
 
   /// Parse a justfile, consumes self
   fn parse_justfile(mut self) -> CompilationResult<'src, Module<'src>> {
+    fn pop_doc_comment<'src>(
+      items: &mut Vec<Item<'src>>,
+      eol_since_last_comment: bool,
+    ) -> Option<&'src str> {
+      if !eol_since_last_comment {
+        if let Some(Item::Comment(contents)) = items.last() {
+          let doc = Some(contents[1..].trim_start());
+          items.pop();
+          return doc;
+        }
+      }
+
+      None
+    }
+
     let mut items = Vec::new();
 
-    let mut doc = None;
+    let mut eol_since_last_comment = false;
 
     loop {
       let next = self.next()?;
 
       if let Some(comment) = self.accept(Comment)? {
-        doc = Some(comment.lexeme()[1..].trim());
+        items.push(Item::Comment(comment.lexeme().trim_end()));
         self.expect_eol()?;
+        eol_since_last_comment = false;
       } else if self.accepted(Eol)? {
+        eol_since_last_comment = true;
       } else if self.accepted(Eof)? {
         break;
       } else if self.next_is(Identifier) {
@@ -317,6 +334,7 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
             } else if self.next_are(&[Identifier, Identifier, ColonEquals]) {
               items.push(Item::Alias(self.parse_alias()?));
             } else {
+              let doc = pop_doc_comment(&mut items, eol_since_last_comment);
               items.push(Item::Recipe(self.parse_recipe(doc, false)?));
             },
           Some(Keyword::Export) =>
@@ -326,6 +344,7 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
               self.presume_keyword(Keyword::Export)?;
               items.push(Item::Assignment(self.parse_assignment(true)?));
             } else {
+              let doc = pop_doc_comment(&mut items, eol_since_last_comment);
               items.push(Item::Recipe(self.parse_recipe(doc, false)?));
             },
           Some(Keyword::Set) =>
@@ -335,6 +354,7 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
             {
               items.push(Item::Set(self.parse_set()?));
             } else {
+              let doc = pop_doc_comment(&mut items, eol_since_last_comment);
               items.push(Item::Recipe(self.parse_recipe(doc, false)?));
             },
           _ =>
@@ -343,17 +363,15 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
             } else if self.next_are(&[Identifier, ColonEquals]) {
               items.push(Item::Assignment(self.parse_assignment(false)?));
             } else {
+              let doc = pop_doc_comment(&mut items, eol_since_last_comment);
               items.push(Item::Recipe(self.parse_recipe(doc, false)?));
             },
         }
       } else if self.accepted(At)? {
+        let doc = pop_doc_comment(&mut items, eol_since_last_comment);
         items.push(Item::Recipe(self.parse_recipe(doc, true)?));
       } else {
         return Err(self.unexpected_token()?);
-      }
-
-      if next.kind != Comment {
-        doc = None;
       }
     }
 
@@ -387,8 +405,8 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
     let value = self.parse_expression()?;
     self.expect_eol()?;
     Ok(Assignment {
-      name,
       export,
+      name,
       value,
     })
   }
@@ -530,7 +548,7 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
       unindented
     };
 
-    Ok(StringLiteral { cooked, raw, kind })
+    Ok(StringLiteral { kind, raw, cooked })
   }
 
   /// Parse a name from an identifier token
@@ -715,6 +733,12 @@ impl<'tokens, 'src> Parser<'tokens, 'src> {
       let value = self.parse_set_bool()?;
       return Ok(Set {
         value: Setting::Export(value),
+        name,
+      });
+    } else if Keyword::PositionalArguments == lexeme {
+      let value = self.parse_set_bool()?;
+      return Ok(Set {
+        value: Setting::PositionalArguments(value),
         name,
       });
     }
@@ -1091,11 +1115,17 @@ mod tests {
   test! {
     name: comment,
     text: "# foo",
-    tree: (justfile),
+    tree: (justfile (comment "# foo")),
   }
 
   test! {
-    name: comment_alias,
+    name: comment_before_alias,
+    text: "# foo\nalias x := y",
+    tree: (justfile (comment "# foo") (alias x y)),
+  }
+
+  test! {
+    name: comment_after_alias,
     text: "alias x := y # foo",
     tree: (justfile (alias x y)),
   }
@@ -1160,7 +1190,7 @@ mod tests {
       x := y
       bar:
     ",
-    tree: (justfile (assignment x y) (recipe bar)),
+    tree: (justfile (comment "# foo") (assignment x y) (recipe bar)),
   }
 
   test! {
@@ -1170,7 +1200,7 @@ mod tests {
 
       bar:
     ",
-    tree: (justfile (recipe bar)),
+    tree: (justfile (comment "# foo") (recipe bar)),
   }
 
   test! {
@@ -1676,6 +1706,24 @@ mod tests {
     name: set_dotenv_load_false,
     text: "set dotenv-load := false",
     tree: (justfile (set dotenv_load false)),
+  }
+
+  test! {
+    name: set_positional_arguments_implicit,
+    text: "set positional-arguments",
+    tree: (justfile (set positional_arguments true)),
+  }
+
+  test! {
+    name: set_positional_arguments_true,
+    text: "set positional-arguments := true",
+    tree: (justfile (set positional_arguments true)),
+  }
+
+  test! {
+    name: set_positional_arguments_false,
+    text: "set positional-arguments := false",
+    tree: (justfile (set positional_arguments false)),
   }
 
   test! {

@@ -1,12 +1,8 @@
 #[cfg(unix)]
 mod unix {
-  use executable_path::executable_path;
-  use std::{
-    fs,
-    process::Command,
-    time::{Duration, Instant},
-  };
-  use test_utilities::tempdir;
+  use crate::common::*;
+
+  use std::time::{Duration, Instant};
 
   fn kill(process_id: u32) {
     unsafe {
@@ -14,16 +10,17 @@ mod unix {
     }
   }
 
-  fn interrupt_test(justfile: &str) {
+  fn interrupt_test(arguments: &[&str], justfile: &str) {
     let tmp = tempdir();
     let mut justfile_path = tmp.path().to_path_buf();
     justfile_path.push("justfile");
-    fs::write(justfile_path, justfile).unwrap();
+    fs::write(justfile_path, unindent(justfile)).unwrap();
 
     let start = Instant::now();
 
     let mut child = Command::new(&executable_path("just"))
       .current_dir(&tmp)
+      .args(arguments)
       .spawn()
       .expect("just invocation failed");
 
@@ -50,11 +47,12 @@ mod unix {
   #[ignore]
   fn interrupt_shebang() {
     interrupt_test(
+      &[],
       "
-default:
-  #!/usr/bin/env sh
-  sleep 1
-",
+        default:
+          #!/usr/bin/env sh
+          sleep 1
+      ",
     );
   }
 
@@ -62,10 +60,11 @@ default:
   #[ignore]
   fn interrupt_line() {
     interrupt_test(
+      &[],
       "
-default:
-  @sleep 1
-",
+        default:
+          @sleep 1
+      ",
     );
   }
 
@@ -73,12 +72,19 @@ default:
   #[ignore]
   fn interrupt_backtick() {
     interrupt_test(
+      &[],
       "
-foo := `sleep 1`
+        foo := `sleep 1`
 
-default:
-  @echo {{foo}}
-",
+        default:
+          @echo {{foo}}
+      ",
     );
+  }
+
+  #[test]
+  #[ignore]
+  fn interrupt_command() {
+    interrupt_test(&["--command", "sleep", "1"], "");
   }
 }

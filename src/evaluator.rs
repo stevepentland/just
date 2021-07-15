@@ -105,6 +105,21 @@ impl<'src, 'run> Evaluator<'src, 'run> {
             function: *name,
             message,
           }),
+          Ternary {
+            name,
+            function,
+            args: [a, b, c],
+            ..
+          } => function(
+            &context,
+            &self.evaluate_expression(a)?,
+            &self.evaluate_expression(b)?,
+            &self.evaluate_expression(c)?,
+          )
+          .map_err(|message| RuntimeError::FunctionCall {
+            function: *name,
+            message,
+          }),
         }
       },
       Expression::StringLiteral { string_literal } => Ok(string_literal.cooked.clone()),
@@ -194,7 +209,7 @@ impl<'src, 'run> Evaluator<'src, 'run> {
     scope: &'run Scope<'src, 'run>,
     settings: &'run Settings,
     search: &'run Search,
-  ) -> RunResult<'src, Scope<'src, 'run>> {
+  ) -> RunResult<'src, (Scope<'src, 'run>, Vec<String>)> {
     let mut evaluator = Evaluator {
       assignments: None,
       scope: scope.child(),
@@ -206,11 +221,15 @@ impl<'src, 'run> Evaluator<'src, 'run> {
 
     let mut scope = scope.child();
 
+    let mut positional = Vec::new();
+
     let mut rest = arguments;
     for parameter in parameters {
       let value = if rest.is_empty() {
         if let Some(ref default) = parameter.default {
-          evaluator.evaluate_expression(default)?
+          let value = evaluator.evaluate_expression(default)?;
+          positional.push(value.clone());
+          value
         } else if parameter.kind == ParameterKind::Star {
           String::new()
         } else {
@@ -219,18 +238,22 @@ impl<'src, 'run> Evaluator<'src, 'run> {
           });
         }
       } else if parameter.kind.is_variadic() {
+        for value in rest {
+          positional.push((*value).to_owned());
+        }
         let value = rest.to_vec().join(" ");
         rest = &[];
         value
       } else {
         let value = rest[0].to_owned();
+        positional.push(value.clone());
         rest = &rest[1..];
         value
       };
       scope.bind(parameter.export, parameter.name, value);
     }
 
-    Ok(scope)
+    Ok((scope, positional))
   }
 
   pub(crate) fn recipe_evaluator(

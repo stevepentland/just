@@ -1,5 +1,6 @@
 use crate::common::*;
 
+use crate::compiler::Compiler;
 use pretty_assertions::assert_eq;
 
 pub(crate) fn compile(text: &str) -> Justfile {
@@ -25,12 +26,17 @@ pub(crate) fn search(config: &Config) -> Search {
   let justfile = working_directory.join(crate::search::FILENAME);
 
   Search {
-    working_directory,
     justfile,
+    working_directory,
   }
 }
 
-pub(crate) use test_utilities::tempdir;
+pub(crate) fn tempdir() -> tempfile::TempDir {
+  tempfile::Builder::new()
+    .prefix("just-test-tempdir")
+    .tempdir()
+    .expect("failed to create temporary directory")
+}
 
 macro_rules! analysis_error {
   (

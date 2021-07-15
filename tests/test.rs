@@ -1,7 +1,5 @@
 use crate::common::*;
 
-pub(crate) use pretty_assertions::assert_eq;
-
 macro_rules! test {
   (
     name:     $name:ident,
@@ -15,7 +13,6 @@ macro_rules! test {
     $(stderr:   $stderr:expr,)?
     $(status:   $status:expr,)?
     $(shell:    $shell:expr,)?
-    $(dotenv_load: $dotenv_load:expr,)?
   ) => {
     #[test]
     fn $name() {
@@ -32,7 +29,6 @@ macro_rules! test {
         $(stderr: $stderr,)?
         $(status: $status,)?
         $(shell: $shell,)?
-        $(dotenv_load: $dotenv_load,)?
         env,
         ..crate::test::Test::default()
       }.run();
@@ -41,29 +37,27 @@ macro_rules! test {
 }
 
 pub(crate) struct Test<'a> {
-  pub(crate) justfile:    &'a str,
-  pub(crate) args:        &'a [&'a str],
-  pub(crate) env:         BTreeMap<String, String>,
-  pub(crate) stdin:       &'a str,
-  pub(crate) stdout:      &'a str,
-  pub(crate) stderr:      &'a str,
-  pub(crate) status:      i32,
-  pub(crate) shell:       bool,
-  pub(crate) dotenv_load: bool,
+  pub(crate) justfile: &'a str,
+  pub(crate) args:     &'a [&'a str],
+  pub(crate) env:      BTreeMap<String, String>,
+  pub(crate) stdin:    &'a str,
+  pub(crate) stdout:   &'a str,
+  pub(crate) stderr:   &'a str,
+  pub(crate) status:   i32,
+  pub(crate) shell:    bool,
 }
 
 impl<'a> Default for Test<'a> {
   fn default() -> Test<'a> {
     Test {
-      justfile:    "",
-      args:        &[],
-      env:         BTreeMap::new(),
-      stdin:       "",
-      stdout:      "",
-      stderr:      "",
-      status:      EXIT_SUCCESS,
-      shell:       true,
-      dotenv_load: true,
+      justfile: "",
+      args:     &[],
+      env:      BTreeMap::new(),
+      stdin:    "",
+      stdout:   "",
+      stderr:   "",
+      status:   EXIT_SUCCESS,
+      shell:    true,
     }
   }
 }
@@ -72,18 +66,14 @@ impl<'a> Test<'a> {
   pub(crate) fn run(self) {
     let tmp = tempdir();
 
-    let mut justfile = unindent(self.justfile);
-
-    if self.dotenv_load {
-      justfile.push_str("\nset dotenv-load := true\n");
-    }
+    let justfile = unindent(self.justfile);
 
     let stdout = unindent(self.stdout);
     let stderr = unindent(self.stderr);
 
     let mut justfile_path = tmp.path().to_path_buf();
     justfile_path.push("justfile");
-    fs::write(justfile_path, justfile).unwrap();
+    fs::write(&justfile_path, justfile).unwrap();
 
     let mut dotenv_path = tmp.path().to_path_buf();
     dotenv_path.push(".env");

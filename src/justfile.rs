@@ -15,7 +15,7 @@ impl<'src> Justfile<'src> {
     for recipe in self.recipes.values() {
       if let Some(first_recipe) = first {
         if recipe.line_number() < first_recipe.line_number() {
-          first = Some(recipe)
+          first = Some(recipe);
         }
       } else {
         first = Some(recipe);
@@ -28,7 +28,7 @@ impl<'src> Justfile<'src> {
     self.recipes.len()
   }
 
-  pub(crate) fn suggest(&self, input: &str) -> Option<Suggestion> {
+  pub(crate) fn suggest_recipe(&self, input: &str) -> Option<Suggestion> {
     let mut suggestions = self
       .recipes
       .keys()
@@ -44,6 +44,26 @@ impl<'src> Justfile<'src> {
           target: Some(alias.target.name.lexeme()),
         })
       }))
+      .filter(|(distance, _suggestion)| distance < &3)
+      .collect::<Vec<(usize, Suggestion)>>();
+    suggestions.sort_by_key(|(distance, _suggestion)| *distance);
+
+    suggestions
+      .into_iter()
+      .map(|(_distance, suggestion)| suggestion)
+      .next()
+  }
+
+  pub(crate) fn suggest_variable(&self, input: &str) -> Option<Suggestion> {
+    let mut suggestions = self
+      .assignments
+      .keys()
+      .map(|name| {
+        (edit_distance(name, input), Suggestion {
+          name,
+          target: None,
+        })
+      })
       .filter(|(distance, _suggestion)| distance < &3)
       .collect::<Vec<(usize, Suggestion)>>();
     suggestions.sort_by_key(|(distance, _suggestion)| *distance);
@@ -107,35 +127,70 @@ impl<'src> Justfile<'src> {
       )?
     };
 
-    if let Subcommand::Evaluate { variables, .. } = &config.subcommand {
-      let mut width = 0;
+    match &config.subcommand {
+      Subcommand::Command {
+        binary, arguments, ..
+      } => {
+        let mut command = if config.shell_command {
+          let mut command = self.settings.shell_command(&config);
+          command.arg(binary);
+          command
+        } else {
+          Command::new(binary)
+        };
 
-      for name in scope.names() {
-        if !variables.is_empty() && !variables.iter().any(|variable| variable == name) {
-          continue;
+        command.args(arguments);
+
+        command.current_dir(&search.working_directory);
+
+        let scope = scope.child();
+
+        command.export(&self.settings, &dotenv, &scope);
+
+        let status = InterruptHandler::guard(|| command.status()).map_err(|io_error| {
+          RuntimeError::CommandInvocation {
+            binary: binary.clone(),
+            arguments: arguments.clone(),
+            io_error,
+          }
+        })?;
+
+        if !status.success() {
+          process::exit(status.code().unwrap_or(EXIT_FAILURE));
+        };
+
+        return Ok(());
+      },
+      Subcommand::Evaluate { variable, .. } => {
+        if let Some(variable) = variable {
+          if let Some(value) = scope.value(variable) {
+            print!("{}", value);
+          } else {
+            return Err(RuntimeError::EvalUnknownVariable {
+              suggestion: self.suggest_variable(&variable),
+              variable:   variable.clone(),
+            });
+          }
+        } else {
+          let mut width = 0;
+
+          for name in scope.names() {
+            width = cmp::max(name.len(), width);
+          }
+
+          for binding in scope.bindings() {
+            println!(
+              "{0:1$} := \"{2}\"",
+              binding.name.lexeme(),
+              width,
+              binding.value
+            );
+          }
         }
 
-        width = cmp::max(name.len(), width);
-      }
-
-      for binding in scope.bindings() {
-        if !variables.is_empty()
-          && !variables
-            .iter()
-            .any(|variable| variable == binding.name.lexeme())
-        {
-          continue;
-        }
-
-        println!(
-          "{0:1$} := \"{2}\"",
-          binding.name.lexeme(),
-          width,
-          binding.value
-        );
-      }
-
-      return Ok(());
+        return Ok(());
+      },
+      _ => {},
     }
 
     let argvec: Vec<&str> = if !arguments.is_empty() {
@@ -186,7 +241,7 @@ impl<'src> Justfile<'src> {
 
     if !missing.is_empty() {
       let suggestion = if missing.len() == 1 {
-        self.suggest(missing.first().unwrap())
+        self.suggest_recipe(missing.first().unwrap())
       } else {
         None
       };
@@ -205,7 +260,7 @@ impl<'src> Justfile<'src> {
 
     let mut ran = BTreeSet::new();
     for (recipe, arguments) in grouped {
-      self.run_recipe(&context, recipe, arguments, &dotenv, &search, &mut ran)?
+      self.run_recipe(&context, recipe, arguments, &dotenv, &search, &mut ran)?;
     }
 
     Ok(())
@@ -216,13 +271,11 @@ impl<'src> Justfile<'src> {
   }
 
   pub(crate) fn get_recipe(&self, name: &str) -> Option<&Recipe<'src>> {
-    if let Some(recipe) = self.recipes.get(name) {
-      Some(recipe)
-    } else if let Some(alias) = self.aliases.get(name) {
-      Some(alias.target.as_ref())
-    } else {
-      None
-    }
+    self
+      .recipes
+      .get(name)
+      .map(Rc::as_ref)
+      .or_else(|| self.aliases.get(name).map(|alias| alias.target.as_ref()))
   }
 
   fn run_recipe<'run>(
@@ -234,7 +287,7 @@ impl<'src> Justfile<'src> {
     search: &'run Search,
     ran: &mut BTreeSet<Vec<String>>,
   ) -> RunResult<'src, ()> {
-    let outer = Evaluator::evaluate_parameters(
+    let (outer, positional) = Evaluator::evaluate_parameters(
       context.config,
       dotenv,
       &recipe.parameters,
@@ -266,7 +319,7 @@ impl<'src> Justfile<'src> {
       }
     }
 
-    recipe.run(context, dotenv, scope.child(), search)?;
+    recipe.run(context, dotenv, scope.child(), search, &positional)?;
 
     let mut invocation = vec![recipe.name().to_owned()];
     for argument in arguments.iter().cloned() {
@@ -580,9 +633,9 @@ mod tests {
     "#,
     args: ["--quiet", "wut"],
     error: Code {
-      code: _,
       line_number,
       recipe,
+      ..
     },
     check: {
       assert_eq!(recipe, "wut");
@@ -749,7 +802,7 @@ goodbye := \"y\"
 hello a b c: x y z
     #! blah
     #blarg
-    {{foo + bar}}abc{{goodbye + \"x\"}}xyz
+    {{ foo + bar }}abc{{ goodbye + \"x\" }}xyz
     1
     2
     3
@@ -775,7 +828,7 @@ install:
 
 install:
     #!/bin/sh
-    if [[ -f {{practicum}} ]]; then
+    if [[ -f {{ practicum }} ]]; then
     \treturn
     fi",
   }
@@ -816,7 +869,7 @@ c := a + b + a + b",
     r#"a:
   echo {{  `echo hello` + "blarg"   }} {{   `echo bob`   }}"#,
     r#"a:
-    echo {{`echo hello` + "blarg"}} {{`echo bob`}}"#,
+    echo {{ `echo hello` + "blarg" }} {{ `echo bob` }}"#,
   }
 
   test! {
@@ -842,7 +895,7 @@ c := a + b + a + b",
     "a b c:
   {{b}} {{c}}",
     "a b c:
-    {{b}} {{c}}",
+    {{ b }} {{ c }}",
   }
 
   test! {
@@ -855,7 +908,7 @@ a:
     "x := arch()
 
 a:
-    {{os()}} {{os_family()}}",
+    {{ os() }} {{ os_family() }}",
   }
 
   test! {
@@ -868,7 +921,7 @@ a:
     r#"x := env_var('foo')
 
 a:
-    {{env_var_or_default('foo' + 'bar', 'baz')}} {{env_var(env_var("baz"))}}"#,
+    {{ env_var_or_default('foo' + 'bar', 'baz') }} {{ env_var(env_var("baz")) }}"#,
   }
 
   test! {

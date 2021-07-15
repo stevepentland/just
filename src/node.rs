@@ -20,6 +20,7 @@ impl<'src> Node<'src> for Item<'src> {
     match self {
       Item::Alias(alias) => alias.tree(),
       Item::Assignment(assignment) => assignment.tree(),
+      Item::Comment(comment) => comment.tree(),
       Item::Recipe(recipe) => recipe.tree(),
       Item::Set(set) => set.tree(),
     }
@@ -62,9 +63,9 @@ impl<'src> Node<'src> for Expression<'src> {
         let mut tree = Tree::atom(Keyword::If.lexeme());
         tree.push_mut(lhs.tree());
         if *inverted {
-          tree.push_mut("!=")
+          tree.push_mut("!=");
         } else {
-          tree.push_mut("==")
+          tree.push_mut("==");
         }
         tree.push_mut(rhs.tree());
         tree.push_mut(then.tree());
@@ -72,9 +73,10 @@ impl<'src> Node<'src> for Expression<'src> {
         tree
       },
       Expression::Call { thunk } => {
+        use Thunk::*;
+
         let mut tree = Tree::atom("call");
 
-        use Thunk::*;
         match thunk {
           Nullary { name, .. } => tree.push_mut(name.lexeme()),
           Unary { name, arg, .. } => {
@@ -87,6 +89,16 @@ impl<'src> Node<'src> for Expression<'src> {
             tree.push_mut(name.lexeme());
             tree.push_mut(a.tree());
             tree.push_mut(b.tree());
+          },
+          Ternary {
+            name,
+            args: [a, b, c],
+            ..
+          } => {
+            tree.push_mut(name.lexeme());
+            tree.push_mut(a.tree());
+            tree.push_mut(b.tree());
+            tree.push_mut(c.tree());
           },
         }
 
@@ -157,8 +169,7 @@ impl<'src> Node<'src> for UnresolvedRecipe<'src> {
 
 impl<'src> Node<'src> for Parameter<'src> {
   fn tree(&self) -> Tree<'src> {
-    let mut children = Vec::new();
-    children.push(Tree::atom(self.name.lexeme()));
+    let mut children = vec![Tree::atom(self.name.lexeme())];
 
     if let Some(default) = &self.default {
       children.push(default.tree());
@@ -185,13 +196,14 @@ impl<'src> Node<'src> for Fragment<'src> {
 
 impl<'src> Node<'src> for Set<'src> {
   fn tree(&self) -> Tree<'src> {
-    let mut set = Tree::atom(Keyword::Set.lexeme());
+    use Setting::*;
 
+    let mut set = Tree::atom(Keyword::Set.lexeme());
     set.push_mut(self.name.lexeme().replace('-', "_"));
 
-    use Setting::*;
     match &self.value {
-      DotenvLoad(value) | Export(value) => set.push_mut(value.to_string()),
+      DotenvLoad(value) | Export(value) | PositionalArguments(value) =>
+        set.push_mut(value.to_string()),
       Shell(setting::Shell { command, arguments }) => {
         set.push_mut(Tree::string(&command.cooked));
         for argument in arguments {
@@ -207,5 +219,11 @@ impl<'src> Node<'src> for Set<'src> {
 impl<'src> Node<'src> for Warning {
   fn tree(&self) -> Tree<'src> {
     unreachable!()
+  }
+}
+
+impl<'src> Node<'src> for str {
+  fn tree(&self) -> Tree<'src> {
+    Tree::atom("comment").push(["\"", self, "\""].concat())
   }
 }

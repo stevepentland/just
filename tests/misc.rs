@@ -265,7 +265,7 @@ recipe:
   args:     ("--show", "recipe"),
   stdout:   r#"
     recipe:
-        echo {{hello + "bar" + bar}}
+        echo {{ hello + "bar" + bar }}
   "#,
 }
 
@@ -1132,85 +1132,6 @@ foo:
 }
 
 test! {
-  name:     test_os_arch_functions_in_interpolation,
-  justfile: r#"
-foo:
-  echo {{arch()}} {{os()}} {{os_family()}}
-"#,
-  stdout:   format!("{} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-  stderr:   format!("echo {} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-}
-
-test! {
-  name:     test_os_arch_functions_in_expression,
-  justfile: r#"
-a := arch()
-o := os()
-f := os_family()
-
-foo:
-  echo {{a}} {{o}} {{f}}
-"#,
-  stdout:   format!("{} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-  stderr:   format!("echo {} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-}
-
-#[cfg(not(windows))]
-test! {
-  name:     env_var_functions,
-  justfile: r#"
-p := env_var('USER')
-b := env_var_or_default('ZADDY', 'HTAP')
-x := env_var_or_default('XYZ', 'ABC')
-
-foo:
-  /bin/echo '{{p}}' '{{b}}' '{{x}}'
-"#,
-  stdout:   format!("{} HTAP ABC\n", env::var("USER").unwrap()).as_str(),
-  stderr:   format!("/bin/echo '{}' 'HTAP' 'ABC'\n", env::var("USER").unwrap()).as_str(),
-}
-
-#[cfg(windows)]
-test! {
-  name:     env_var_functions,
-  justfile: r#"
-p := env_var('USERNAME')
-b := env_var_or_default('ZADDY', 'HTAP')
-x := env_var_or_default('XYZ', 'ABC')
-
-foo:
-  /bin/echo '{{p}}' '{{b}}' '{{x}}'
-"#,
-  stdout:   format!("{} HTAP ABC\n", env::var("USERNAME").unwrap()).as_str(),
-  stderr:   format!("/bin/echo '{}' 'HTAP' 'ABC'\n", env::var("USERNAME").unwrap()).as_str(),
-}
-
-test! {
-  name:     env_var_failure,
-  justfile: "a:\n  echo {{env_var('ZADDY')}}",
-  args:     ("a"),
-  stdout:   "",
-  stderr:   "error: Call to function `env_var` failed: environment variable `ZADDY` not present
-  |
-2 |   echo {{env_var('ZADDY')}}
-  |          ^^^^^^^
-",
-  status:   EXIT_FAILURE,
-}
-
-test! {
-  name:     test_just_executable_function,
-  justfile: "
-    a:
-      @printf 'Executable path is: %s\\n' '{{ just_executable() }}'
-  ",
-  args:     ("a"),
-  stdout:   format!("Executable path is: {}\n", executable_path("just").to_str().unwrap()).as_str(),
-  stderr:   "",
-  status:   EXIT_SUCCESS,
-}
-
-test! {
   name: infallable_command,
   justfile: r#"
 infallable:
@@ -1863,16 +1784,6 @@ foo x=y:
 }
 
 test! {
-  name:     test_os_arch_functions_in_default,
-  justfile: r#"
-foo a=arch() o=os() f=os_family():
-  echo {{a}} {{o}} {{f}}
-"#,
-  stdout:   format!("{} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-  stderr:   format!("echo {} {} {}\n", target::arch(), target::os(), target::os_family()).as_str(),
-}
-
-test! {
   name:     unterminated_interpolation_eol,
   justfile: "
     foo:
@@ -1949,14 +1860,10 @@ test! {
   stdout:   "
     default stdin = `cat justfile`:
       echo {{stdin}}
-
-    set dotenv-load := true
   ",
   stderr:   "
     echo 'default stdin = `cat justfile`:
-      echo '{{stdin}}'
-
-    set dotenv-load := true'
+      echo '{{stdin}}''
   ",
 }
 

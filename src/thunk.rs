@@ -1,7 +1,7 @@
 use crate::common::*;
 
 #[derive(Derivative)]
-#[derivative(Debug, PartialEq = "feature_allow_slow_enum")]
+#[derivative(Debug, Clone, PartialEq = "feature_allow_slow_enum")]
 pub(crate) enum Thunk<'src> {
   Nullary {
     name:     Name<'src>,
@@ -19,6 +19,12 @@ pub(crate) enum Thunk<'src> {
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
     function: fn(&FunctionContext, &str, &str) -> Result<String, String>,
     args:     [Box<Expression<'src>>; 2],
+  },
+  Ternary {
+    name:     Name<'src>,
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    function: fn(&FunctionContext, &str, &str, &str) -> Result<String, String>,
+    args:     [Box<Expression<'src>>; 3],
   },
 }
 
@@ -47,6 +53,16 @@ impl<'src> Thunk<'src> {
             name,
           })
         },
+        (Function::Ternary(function), 3) => {
+          let c = Box::new(arguments.pop().unwrap());
+          let b = Box::new(arguments.pop().unwrap());
+          let a = Box::new(arguments.pop().unwrap());
+          Ok(Thunk::Ternary {
+            function: *function,
+            args: [a, b, c],
+            name,
+          })
+        },
         _ => Err(
           name.error(CompilationErrorKind::FunctionArgumentCountMismatch {
             function: name.lexeme(),
@@ -72,6 +88,11 @@ impl Display for Thunk<'_> {
       Binary {
         name, args: [a, b], ..
       } => write!(f, "{}({}, {})", name.lexeme(), a, b),
+      Ternary {
+        name,
+        args: [a, b, c],
+        ..
+      } => write!(f, "{}({}, {}, {})", name.lexeme(), a, b, c),
     }
   }
 }

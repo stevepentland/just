@@ -60,11 +60,12 @@ export        : 'export' assignment
 
 setting       : 'set' 'dotenv-load' boolean?
               | 'set' 'export' boolean?
+              | 'set' 'positional-arguments' boolean?
               | 'set' 'shell' ':=' '[' string (',' string)* ','? ']'
 
 boolean       : ':=' ('true' | 'false')
 
-expression    : 'if' condition '{' expression '}' else '{' expression '}'
+expression    : 'if' condition '{' expression '}' 'else' '{' expression '}'
               | value '+' expression
               | value
 
@@ -88,14 +89,14 @@ sequence      : expression ',' sequence
 
 recipe        : '@'? NAME parameter* variadic? ':' dependency* body?
 
-parameter     : NAME
-              | NAME '=' value
+parameter     : '$'? NAME
+              | '$'? NAME '=' value
 
 variadic      : '*' parameter
               | '+' parameter
 
 dependency    : NAME
-              | '(' NAME expression* ')
+              | '(' NAME expression* ')'
 
 body          : INDENT line+ DEDENT
 

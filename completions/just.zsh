@@ -26,6 +26,8 @@ _just() {
 '*--shell-arg=[Invoke shell with <SHELL-ARG> as an argument]' \
 '-d+[Use <WORKING-DIRECTORY> as working directory. --justfile must also be set]' \
 '--working-directory=[Use <WORKING-DIRECTORY> as working directory. --justfile must also be set]' \
+'-c+[Run an arbitrary command with the working directory, `.env`, overrides, and exports set]' \
+'--command=[Run an arbitrary command with the working directory, `.env`, overrides, and exports set]' \
 '--completions=[Print shell completion script for <SHELL>]: :(zsh bash fish powershell elvish)' \
 '-s+[Show information about <RECIPE>]: :_just_commands' \
 '--show=[Show information about <RECIPE>]: :_just_commands' \
@@ -35,16 +37,19 @@ _just() {
 '--no-highlight[Don'\''t highlight echoed recipe lines in bold]' \
 '(--dry-run)-q[Suppress all output]' \
 '(--dry-run)--quiet[Suppress all output]' \
+'--shell-command[Invoke <COMMAND> with the shell used to run recipe lines and backticks]' \
 '--clear-shell-args[Clear shell arguments]' \
 '-u[Return list and summary entries in source order]' \
 '--unsorted[Return list and summary entries in source order]' \
+'--unstable[Enable unstable features]' \
 '*-v[Use verbose output]' \
 '*--verbose[Use verbose output]' \
 '--choose[Select one or more recipes to run using a binary. If `--chooser` is not passed the chooser defaults to the value of $JUST_CHOOSER, falling back to `fzf`]' \
 '--dump[Print entire justfile]' \
 '-e[Edit justfile with editor given by $VISUAL or $EDITOR, falling back to `vim`]' \
 '--edit[Edit justfile with editor given by $VISUAL or $EDITOR, falling back to `vim`]' \
-'--evaluate[Evaluate and print all variables. If positional arguments are present, only print the variables whose names are given as arguments.]' \
+'--evaluate[Evaluate and print all variables. If a variable name is given as an argument, only print that variable'\''s value.]' \
+'--fmt[Format and overwrite justfile]' \
 '--init[Initialize new justfile in project root]' \
 '-l[List available recipes and their arguments]' \
 '--list[List available recipes and their arguments]' \

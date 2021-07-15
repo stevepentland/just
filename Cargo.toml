@@ -1,6 +1,6 @@
 [package]
 name        = "just"
-version     = "0.9.0"
+version     = "0.9.8"
 description = "🤖 Just a command runner"
 authors     = ["Casey Rodarmor <casey@rodarmor.com>"]
 license     = "CC0-1.0"
@@ -11,19 +11,26 @@ edition     = "2018"
 autotests   = false
 categories  = ["command-line-utilities", "development-tools"]
 keywords    = ["command-line", "task", "runner", "development", "utility"]
+resolver    = "2"
+
+[workspace]
+members = [".", "bin/ref-type"]
 
 [dependencies]
 ansi_term     = "0.12.0"
 atty          = "0.2.0"
+camino        = "1.0.4"
 clap          = "2.33.0"
 derivative    = "2.0.0"
 dotenv        = "0.15.0"
 edit-distance = "2.0.0"
 env_logger    = "0.8.0"
 lazy_static   = "1.0.0"
+lexiclean     = "0.0.1"
 libc          = "0.2.0"
 log           = "0.4.4"
 snafu         = "0.6.0"
+strum_macros  = "0.21.1"
 target        = "1.0.0"
 tempfile      = "3.0.0"
 unicode-width = "0.1.0"
@@ -33,19 +40,15 @@ version  = "3.1.1"
 features = ["termination"]
 
 [dependencies.strum]
-version  = "0.20.0"
+version  = "0.21.0"
 features = ["derive"]
 
 [dev-dependencies]
 executable-path   = "1.0.0"
 pretty_assertions = "0.7.0"
+temptree          = "0.1.0"
 which             = "4.0.0"
-
-# Until github.com/rust-lang/cargo/pull/7333 makes it into stable,
-# this version-less dev-dependency will interfere with publishing
-# to crates.io. In the meantime, we can publish with nighlty cargo.
-[dev-dependencies.test-utilities]
-path = "test-utilities"
+yaml-rust         = "0.4.5"
 
 [features]
 # No features are active by default.
@@ -53,10 +56,6 @@ default = []
 # The `help4help2man` feature modifies the message produced by `--help`
 # so that `help2man` produces a reasonable man page.
 help4help2man = []
-# The `summary` feature includes the `summary` module, which is used
-# by Janus, https://github.com/casey/janus, a tool that analyses all
-# public justfiles on GitHub to avoid breaking changes.
-summary = []
 
 # The public documentation is minimal and doesn't change between
 # platforms, so we only build them for linux on docs.rs to save

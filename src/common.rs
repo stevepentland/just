@@ -3,11 +3,12 @@ pub(crate) use std::{
   cmp,
   collections::{BTreeMap, BTreeSet},
   env,
-  ffi::OsString,
+  ffi::{OsStr, OsString},
   fmt::{self, Debug, Display, Formatter},
-  fs,
+  fs::{self, File},
   io::{self, Cursor, Write},
   iter::{self, FromIterator},
+  mem,
   ops::{Index, Range, RangeInclusive},
   path::{Path, PathBuf},
   process::{self, Command, Stdio},
@@ -18,8 +19,10 @@ pub(crate) use std::{
 };
 
 // dependencies
+pub(crate) use camino::Utf8Path;
 pub(crate) use derivative::Derivative;
 pub(crate) use edit_distance::edit_distance;
+pub(crate) use lexiclean::Lexiclean;
 pub(crate) use libc::EXIT_FAILURE;
 pub(crate) use log::{info, warn};
 pub(crate) use snafu::{ResultExt, Snafu};
@@ -45,21 +48,21 @@ pub(crate) use crate::{
   alias::Alias, analyzer::Analyzer, assignment::Assignment,
   assignment_resolver::AssignmentResolver, binding::Binding, color::Color,
   compilation_error::CompilationError, compilation_error_kind::CompilationErrorKind,
-  compiler::Compiler, config::Config, config_error::ConfigError, count::Count,
-  delimiter::Delimiter, dependency::Dependency, enclosure::Enclosure, evaluator::Evaluator,
-  expression::Expression, fragment::Fragment, function::Function,
-  function_context::FunctionContext, interrupt_guard::InterruptGuard,
-  interrupt_handler::InterruptHandler, item::Item, justfile::Justfile, keyword::Keyword,
-  lexer::Lexer, line::Line, list::List, load_error::LoadError, module::Module, name::Name,
-  output_error::OutputError, parameter::Parameter, parameter_kind::ParameterKind, parser::Parser,
-  platform::Platform, position::Position, positional::Positional, recipe::Recipe,
-  recipe_context::RecipeContext, recipe_resolver::RecipeResolver, runtime_error::RuntimeError,
-  scope::Scope, search::Search, search_config::SearchConfig, search_error::SearchError, set::Set,
-  setting::Setting, settings::Settings, shebang::Shebang, show_whitespace::ShowWhitespace,
-  string_kind::StringKind, string_literal::StringLiteral, subcommand::Subcommand,
-  suggestion::Suggestion, table::Table, thunk::Thunk, token::Token, token_kind::TokenKind,
-  unresolved_dependency::UnresolvedDependency, unresolved_recipe::UnresolvedRecipe,
-  use_color::UseColor, variables::Variables, verbosity::Verbosity, warning::Warning,
+  config::Config, config_error::ConfigError, count::Count, delimiter::Delimiter,
+  dependency::Dependency, enclosure::Enclosure, evaluator::Evaluator, expression::Expression,
+  fragment::Fragment, function::Function, function_context::FunctionContext,
+  interrupt_guard::InterruptGuard, interrupt_handler::InterruptHandler, item::Item,
+  justfile::Justfile, keyword::Keyword, lexer::Lexer, line::Line, list::List,
+  load_error::LoadError, module::Module, name::Name, output_error::OutputError,
+  parameter::Parameter, parameter_kind::ParameterKind, parser::Parser, platform::Platform,
+  position::Position, positional::Positional, recipe::Recipe, recipe_context::RecipeContext,
+  recipe_resolver::RecipeResolver, runtime_error::RuntimeError, scope::Scope, search::Search,
+  search_config::SearchConfig, search_error::SearchError, set::Set, setting::Setting,
+  settings::Settings, shebang::Shebang, show_whitespace::ShowWhitespace, string_kind::StringKind,
+  string_literal::StringLiteral, subcommand::Subcommand, suggestion::Suggestion, table::Table,
+  thunk::Thunk, token::Token, token_kind::TokenKind, unresolved_dependency::UnresolvedDependency,
+  unresolved_recipe::UnresolvedRecipe, use_color::UseColor, variables::Variables,
+  verbosity::Verbosity, warning::Warning,
 };
 
 // type aliases
