@@ -1,313 +1,761 @@
-use crate::common::*;
-
-use std::process::{ExitStatus, Stdio};
-
-/// Return a `Error::Signal` if the process was terminated by a signal,
-/// otherwise return an `Error::UnknownFailure`
-fn error_from_signal(recipe: &str, line_number: Option<usize>, exit_status: ExitStatus) -> Error {
-  match Platform::signal_from_exit_status(exit_status) {
-    Some(signal) => Error::Signal {
-      recipe,
-      line_number,
-      signal,
-    },
-    None => Error::Unknown {
-      recipe,
-      line_number,
-    },
-  }
-}
+use super::*;
 
 /// A recipe, e.g. `foo: bar baz`
 #[derive(PartialEq, Debug, Clone, Serialize)]
 pub(crate) struct Recipe<'src, D = Dependency<'src>> {
+  pub(crate) attributes: AttributeSet<'src>,
   pub(crate) body: Vec<Line<'src>>,
   pub(crate) dependencies: Vec<D>,
-  pub(crate) doc: Option<&'src str>,
+  pub(crate) doc: Option<String>,
+  #[serde(skip)]
+  pub(crate) file_depth: u32,
+  #[serde(skip)]
+  pub(crate) import_offsets: Vec<usize>,
+  #[serde(skip)]
+  pub(crate) module_path: Option<Modulepath>,
   pub(crate) name: Name<'src>,
+  #[serde(skip)]
+  pub(crate) number: Number,
   pub(crate) parameters: Vec<Parameter<'src>>,
   pub(crate) priors: usize,
   pub(crate) private: bool,
   pub(crate) quiet: bool,
+  #[serde(rename = "namepath")]
+  pub(crate) recipe_path: Option<Modulepath>,
   pub(crate) shebang: bool,
+  #[serde(skip)]
+  pub(crate) trailing_comment: Option<&'src str>,
+  #[serde(skip)]
+  pub(crate) variable_references: HashSet<Number>,
 }
 
 impl<'src, D> Recipe<'src, D> {
-  pub(crate) fn argument_range(&self) -> RangeInclusive<usize> {
-    self.min_arguments()..=self.max_arguments()
-  }
-
-  pub(crate) fn min_arguments(&self) -> usize {
-    self
-      .parameters
-      .iter()
-      .filter(|p| p.default.is_none() && p.kind != ParameterKind::Star)
-      .count()
-  }
-
-  pub(crate) fn max_arguments(&self) -> usize {
-    if self.parameters.iter().any(|p| p.kind.is_variadic()) {
-      usize::max_value() - 1
+  pub(crate) fn is_script(&self, settings: &Settings) -> bool {
+    if self.attributes.contains(AttributeKind::Shell) {
+      false
     } else {
-      self.parameters.len()
+      self.shebang || settings.default_script
     }
   }
 
   pub(crate) fn name(&self) -> &'src str {
     self.name.lexeme()
   }
+}
+
+impl<'src> Recipe<'src> {
+  pub(crate) fn module_path(&self) -> &Modulepath {
+    self.module_path.as_ref().unwrap()
+  }
+
+  pub(crate) fn recipe_path(&self) -> &Modulepath {
+    self.recipe_path.as_ref().unwrap()
+  }
+
+  pub(crate) fn spaced_recipe_path(&self) -> String {
+    self.recipe_path().to_string().replace("::", " ")
+  }
+
+  pub(crate) fn argument_range(&self, settings: &Settings) -> RangeInclusive<usize> {
+    self.min_arguments()..=self.max_arguments(settings)
+  }
+
+  pub(crate) fn group_arguments(
+    &self,
+    arguments: &[DependencyArgument<'src>],
+    settings: &Settings,
+  ) -> Vec<Vec<DependencyArgument<'src>>> {
+    let mut groups = Vec::new();
+    let mut rest = arguments;
+
+    for parameter in &self.parameters {
+      let group = if parameter.kind.is_variadic() && !settings.lists {
+        mem::take(&mut rest).into()
+      } else if let Some(argument) = rest.first() {
+        rest = &rest[1..];
+        vec![argument.clone()]
+      } else {
+        Vec::new()
+      };
+
+      groups.push(group);
+    }
+
+    groups
+  }
+
+  pub(crate) fn min_arguments(&self) -> usize {
+    self.parameters.iter().filter(|p| p.is_required()).count()
+  }
+
+  pub(crate) fn max_arguments(&self, settings: &Settings) -> usize {
+    if !settings.lists && self.parameters.iter().any(|p| p.kind.is_variadic()) {
+      usize::MAX - 1
+    } else {
+      self.parameters.len()
+    }
+  }
 
   pub(crate) fn line_number(&self) -> usize {
     self.name.line
   }
 
-  pub(crate) fn public(&self) -> bool {
-    !self.private
+  pub(crate) fn confirm(&self, evaluator: &mut Evaluator<'src, '_>) -> RunResult<'src, bool> {
+    if let Some(Attribute::Confirm(prompt)) = self.attributes.get(AttributeKind::Confirm) {
+      if let Some(expression) = prompt {
+        eprint!("{} ", evaluator.evaluate_value(expression)?.join());
+      } else {
+        eprint!("Run recipe `{}`? ", self.name);
+      }
+      let mut line = String::new();
+      std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|io_error| Error::GetConfirmation { io_error })?;
+      let line = line.trim().to_lowercase();
+      Ok(line == "y" || line == "yes")
+    } else {
+      Ok(true)
+    }
+  }
+
+  pub(crate) fn check_can_be_default_recipe(&self) -> RunResult<'src> {
+    let min_arguments = self.min_arguments();
+    if min_arguments > 0 {
+      return Err(Error::DefaultRecipeRequiresArguments {
+        recipe: self.name.lexeme(),
+        min_arguments,
+      });
+    }
+
+    Ok(())
+  }
+
+  fn continue_on(&self, signal: Signal) -> bool {
+    let Some(Attribute::Continue(signals)) = self.attributes.get(AttributeKind::Continue) else {
+      return false;
+    };
+
+    if signals.is_empty() {
+      signal == Signal::Interrupt
+    } else {
+      signals.contains(&signal)
+    }
+  }
+
+  pub(crate) fn is_parallel(&self) -> bool {
+    self.attributes.contains(AttributeKind::Parallel)
+  }
+
+  pub(crate) fn is_public(&self) -> bool {
+    !self.private && !self.attributes.private()
+  }
+
+  pub(crate) fn takes_positional_arguments(&self, settings: &Settings) -> bool {
+    settings.positional_arguments || self.attributes.contains(AttributeKind::PositionalArguments)
+  }
+
+  pub(crate) fn change_directory(&self, settings: &Settings) -> bool {
+    if self.attributes.contains(AttributeKind::WorkingDirectory) {
+      return true;
+    }
+
+    if self.attributes.contains(AttributeKind::NoCd) {
+      return false;
+    }
+
+    !settings.no_cd
+  }
+
+  fn print_exit_message(&self, settings: &Settings) -> bool {
+    if self.attributes.contains(AttributeKind::ExitMessage) {
+      true
+    } else if settings.no_exit_message {
+      false
+    } else {
+      !self.attributes.contains(AttributeKind::NoExitMessage)
+    }
+  }
+
+  fn working_directory<'a, 'run>(
+    &'a self,
+    context: &'a ExecutionContext,
+    evaluator: &mut Evaluator<'src, 'run>,
+  ) -> RunResult<'src, Option<Utf8PathBuf>> {
+    if !self.change_directory(&context.module.settings) {
+      return Ok(None);
+    }
+
+    let working_directory = context.working_directory();
+
+    for attribute in &self.attributes {
+      if let Attribute::WorkingDirectory(expression) = attribute {
+        return Ok(Some(working_directory.join(&evaluator.evaluate_string(
+          expression,
+          StringContext::WorkingDirectoryAttribute(self.attributes.name(attribute)),
+        )?)));
+      }
+    }
+
+    Ok(Some(working_directory))
+  }
+
+  fn no_quiet(&self) -> bool {
+    self.attributes.contains(AttributeKind::NoQuiet)
+  }
+
+  fn timestamp_format(
+    &self,
+    config: &Config,
+    evaluator: &mut Evaluator<'src, '_>,
+  ) -> RunResult<'src, Option<String>> {
+    if let Some(attribute) = self.attributes.get(AttributeKind::Timestamp) {
+      let Attribute::Timestamp(format) = attribute else {
+        unreachable!();
+      };
+      Ok(Some(
+        format
+          .as_ref()
+          .map(|expression| {
+            evaluator.evaluate_string(
+              expression,
+              StringContext::TimestampAttribute(self.attributes.name(attribute)),
+            )
+          })
+          .transpose()?
+          .unwrap_or_else(|| config.timestamp_format.clone()),
+      ))
+    } else if config.timestamp {
+      Ok(Some(config.timestamp_format.clone()))
+    } else {
+      Ok(None)
+    }
   }
 
   pub(crate) fn run<'run>(
     &self,
-    context: &RecipeContext<'src, 'run>,
-    dotenv: &BTreeMap<String, String>,
-    scope: Scope<'src, 'run>,
-    search: &'run Search,
+    cache: &Cache,
+    context: &ExecutionContext<'src, 'run>,
+    env: &BTreeMap<String, String>,
+    is_dependency: bool,
+    jobs: &Semaphore,
     positional: &[String],
-  ) -> RunResult<'src, ()> {
-    let config = &context.config;
+    scope: &Scope<'src, 'run>,
+  ) -> RunResult<'src> {
+    let _guard = jobs.acquire();
 
-    if config.verbosity.loquacious() {
-      let color = config.color.stderr().banner();
+    let color = context.config.color.stderr().banner();
+    let prefix = color.prefix();
+    let suffix = color.suffix();
+
+    if context.config.verbosity.loquacious() {
       eprintln!(
-        "{}===> Running recipe `{}`...{}",
-        color.prefix(),
-        self.name,
-        color.suffix()
+        "{prefix}===> running recipe `{}`...{suffix}",
+        self.recipe_path(),
       );
     }
 
-    let mut evaluator =
-      Evaluator::recipe_evaluator(context.config, dotenv, &scope, context.settings, search);
+    if context.config.explain
+      && let Some(doc) = self.doc()
+    {
+      eprintln!("{prefix}#### {doc}{suffix}");
+    }
 
-    if self.shebang {
-      let mut evaluated_lines = vec![];
-      for line in &self.body {
-        evaluated_lines.push(evaluator.evaluate_line(line, false)?);
-      }
+    let evaluator = Evaluator::new(context, env.clone(), is_dependency, Some(self.name), scope);
 
-      if config.verbosity.loud() && (config.dry_run || self.quiet) {
-        for line in &evaluated_lines {
-          eprintln!("{}", line);
-        }
-      }
+    let start = Instant::now();
+    let result = if self.is_script(&context.module.settings) {
+      self.run_script(cache, context, env, evaluator, positional, scope)
+    } else {
+      self.run_shell(context, env, evaluator, positional, scope)
+    };
+    let elapsed = start.elapsed();
 
-      if config.dry_run {
+    if context.config.time {
+      let color = context.config.command_color_stderr();
+
+      let prefix = color.prefix();
+      let suffix = color.suffix();
+      let recipe_name = self.name.lexeme();
+
+      eprintln!(
+        "{prefix}---> {recipe_name} completed in {:.3}s{suffix}",
+        elapsed.as_secs_f64(),
+      );
+    }
+
+    result
+  }
+
+  fn run_shell<'run>(
+    &self,
+    context: &ExecutionContext<'src, 'run>,
+    env: &BTreeMap<String, String>,
+    mut evaluator: Evaluator<'src, 'run>,
+    positional: &[String],
+    scope: &Scope<'src, 'run>,
+  ) -> RunResult<'src> {
+    let config = &context.config;
+    let settings = &context.module.settings;
+
+    let mut lines = self.body.iter().peekable();
+    let mut line_number = self.line_number() + 1;
+
+    let working_directory = self.working_directory(context, &mut evaluator)?;
+
+    let timestamp_format = self.timestamp_format(config, &mut evaluator)?;
+
+    loop {
+      let Some(line) = lines.peek() else {
         return Ok(());
-      }
+      };
 
-      let shebang_line = evaluated_lines.first().ok_or_else(|| Error::Internal {
-        message: "evaluated_lines was empty".to_owned(),
-      })?;
+      let mut evaluated = String::new();
+      let mut continued = false;
 
-      let shebang = Shebang::new(shebang_line).ok_or_else(|| Error::Internal {
-        message: format!("bad shebang line: {}", shebang_line),
-      })?;
+      let comment_line = settings.ignore_comments && line.is_comment();
+      let sigils = line.sigils(settings);
 
-      let tmp = tempfile::Builder::new()
-        .prefix("just")
-        .tempdir()
-        .map_err(|error| Error::TmpdirIo {
-          recipe: self.name(),
-          io_error: error,
-        })?;
-      let mut path = tmp.path().to_path_buf();
-
-      path.push(shebang.script_filename(self.name()));
-
-      {
-        let mut f = fs::File::create(&path).map_err(|error| Error::TmpdirIo {
-          recipe: self.name(),
-          io_error: error,
-        })?;
-        let mut text = String::new();
-
-        if shebang.include_shebang_line() {
-          text += &evaluated_lines[0];
+      for line in lines.by_ref() {
+        line_number = line.number + 1;
+        if !comment_line {
+          evaluated += &evaluator.evaluate_line(line, continued)?;
+        }
+        if line.is_continuation() && !comment_line {
+          continued = true;
+          evaluated.pop();
         } else {
-          text += "\n";
+          break;
         }
-
-        text += "\n";
-        // add blank lines so that lines in the generated script have the same line
-        // number as the corresponding lines in the justfile
-        for _ in 1..(self.line_number() + 2) {
-          text += "\n";
-        }
-        for line in &evaluated_lines[1..] {
-          text += line;
-          text += "\n";
-        }
-
-        if config.verbosity.grandiloquent() {
-          eprintln!("{}", config.color.doc().stderr().paint(&text));
-        }
-
-        f.write_all(text.as_bytes())
-          .map_err(|error| Error::TmpdirIo {
-            recipe: self.name(),
-            io_error: error,
-          })?;
       }
 
-      // make the script executable
-      Platform::set_execute_permission(&path).map_err(|error| Error::TmpdirIo {
-        recipe: self.name(),
-        io_error: error,
-      })?;
-
-      // create a command to run the script
-      let mut command =
-        Platform::make_shebang_command(&path, &context.search.working_directory, shebang).map_err(
-          |output_error| Error::Cygpath {
-            recipe: self.name(),
-            output_error,
-          },
-        )?;
-
-      if context.settings.positional_arguments {
-        command.args(positional);
+      if comment_line {
+        continue;
       }
 
-      command.export(context.settings, dotenv, &scope);
+      let command = &evaluated[sigils.len()..];
 
-      // run it!
-      match InterruptHandler::guard(|| command.status()) {
+      if command.is_empty() {
+        continue;
+      }
+
+      let guard = sigils.contains(&Sigil::Guard);
+      let infallible = sigils.contains(&Sigil::Infallible);
+      let quiet = sigils.contains(&Sigil::Quiet);
+
+      let timestamp = timestamp_format
+        .as_deref()
+        .map(|format| datetime_format(chrono::Local::now(), format).map_err(Error::DatetimeFormat))
+        .transpose()?;
+
+      if settings.skip_recipes(config)
+        || config.verbosity.loquacious()
+        || timestamp.is_some()
+        || !((quiet ^ self.quiet)
+          || (settings.quiet && !self.no_quiet())
+          || config.verbosity.quiet())
+      {
+        let color = config.command_color_stderr();
+
+        if let Some(timestamp) = timestamp {
+          eprint!("[{}] ", color.paint(&timestamp));
+        }
+
+        eprintln!("{}", color.paint(command));
+      }
+
+      if settings.skip_recipes(config) {
+        continue;
+      }
+
+      let mut cmd = settings.shell_command(config);
+
+      if let Some(working_directory) = &working_directory {
+        cmd.current_dir(working_directory);
+      }
+
+      cmd.shell_arg(command);
+
+      if self.takes_positional_arguments(settings) {
+        cmd.arg(self.name.lexeme());
+        cmd.args(positional);
+      }
+
+      if config.verbosity.quiet() {
+        cmd.stderr(Stdio::null());
+        cmd.stdout(Stdio::null());
+      }
+
+      let environment =
+        Environment::new(context.dotenv, scope, settings, &context.module.unexports);
+
+      environment.export(&mut cmd);
+
+      for (key, value) in env {
+        cmd.env(key, value);
+      }
+
+      let (result, caught) = cmd.status_guard();
+
+      match result {
         Ok(exit_status) => {
           if let Some(code) = exit_status.code() {
             if code != 0 {
-              return Err(Error::Code {
-                recipe: self.name(),
-                line_number: None,
-                code,
-              });
-            }
-          } else {
-            return Err(error_from_signal(self.name(), None, exit_status));
-          }
-        }
-        Err(io_error) => {
-          return Err(Error::Shebang {
-            recipe: self.name(),
-            command: shebang.interpreter.to_owned(),
-            argument: shebang.argument.map(String::from),
-            io_error,
-          });
-        }
-      };
-    } else {
-      let mut lines = self.body.iter().peekable();
-      let mut line_number = self.line_number() + 1;
-      loop {
-        if lines.peek().is_none() {
-          break;
-        }
-        let mut evaluated = String::new();
-        let mut continued = false;
-        let quiet_command = lines.peek().map_or(false, |line| line.is_quiet());
-        let infallable_command = lines.peek().map_or(false, |line| line.is_infallable());
-        loop {
-          if lines.peek().is_none() {
-            break;
-          }
-          let line = lines.next().unwrap();
-          line_number += 1;
-          evaluated += &evaluator.evaluate_line(line, continued)?;
-          if line.is_continuation() {
-            continued = true;
-            evaluated.pop();
-          } else {
-            break;
-          }
-        }
-        let mut command = evaluated.as_str();
-        if quiet_command || infallable_command {
-          command = &command[1..];
-        }
+              if guard {
+                if code == 1 {
+                  return Ok(());
+                }
 
-        if command.is_empty() {
-          continue;
-        }
-
-        if config.dry_run
-          || config.verbosity.loquacious()
-          || !((quiet_command ^ self.quiet) || config.verbosity.quiet())
-        {
-          let color = if config.highlight {
-            config.color.command()
-          } else {
-            config.color
-          };
-          eprintln!("{}", color.stderr().paint(command));
-        }
-
-        if config.dry_run {
-          continue;
-        }
-
-        let mut cmd = context.settings.shell_command(config);
-
-        cmd.current_dir(&context.search.working_directory);
-
-        cmd.arg(command);
-
-        if context.settings.positional_arguments {
-          cmd.arg(self.name.lexeme());
-          cmd.args(positional);
-        }
-
-        if config.verbosity.quiet() {
-          cmd.stderr(Stdio::null());
-          cmd.stdout(Stdio::null());
-        }
-
-        cmd.export(context.settings, dotenv, &scope);
-
-        match InterruptHandler::guard(|| cmd.status()) {
-          Ok(exit_status) => {
-            if let Some(code) = exit_status.code() {
-              if code != 0 && !infallable_command {
+                return Err(Error::GuardCode {
+                  recipe: self.name(),
+                  line_number,
+                  code,
+                });
+              } else if !infallible {
                 return Err(Error::Code {
                   recipe: self.name(),
                   line_number: Some(line_number),
                   code,
+                  print_message: self.print_exit_message(settings),
                 });
               }
-            } else {
-              return Err(error_from_signal(
-                self.name(),
-                Some(line_number),
-                exit_status,
-              ));
             }
+          } else if !infallible {
+            return Err(Error::from_signal(
+              exit_status,
+              Some(line_number),
+              self.print_exit_message(settings),
+              self.name(),
+            ));
           }
-          Err(io_error) => {
-            return Err(Error::Io {
-              recipe: self.name(),
-              io_error,
-            });
-          }
-        };
+        }
+        Err(io_error) => {
+          return Err(Error::ShellIo {
+            io_error,
+            recipe: self.name(),
+            shell: settings.shell(config).0.into(),
+          });
+        }
+      }
+
+      if let Some(signal) = caught {
+        if self.continue_on(signal) || infallible {
+          SignalHandler::clear();
+        } else {
+          return Err(Error::Interrupted { signal });
+        }
       }
     }
+  }
+
+  fn cache_status(
+    &self,
+    cache: &Cache,
+    context: &ExecutionContext<'src, '_>,
+    environment: &Environment,
+    evaluated_lines: &[String],
+    evaluator: &mut Evaluator<'src, '_>,
+    executor: &Executor,
+    extension: Option<&str>,
+    positional: &[String],
+    working_directory: Option<&Utf8Path>,
+  ) -> RunResult<'src, Option<CacheStatus>> {
+    if context.config.no_cache {
+      return Ok(None);
+    }
+
+    let Some(Attribute::Cache {
+      environment: environment_attribute,
+      extra,
+      inputs,
+      outputs,
+    }) = self.attributes.get(AttributeKind::Cache)
+    else {
+      return Ok(None);
+    };
+
+    let working_directory = match working_directory {
+      Some(working_directory) => working_directory.to_owned(),
+      None => dir::current_directory()?,
+    };
+
+    let environment_attribute = environment_attribute
+      .as_ref()
+      .map(|environment| evaluator.evaluate_value(environment))
+      .transpose()?;
+
+    let environment = if let Some(names) = environment_attribute {
+      let mut variables = BTreeMap::new();
+
+      for name in names {
+        let value = if let Some(value) = environment.variables.get(&name) {
+          value.clone()
+        } else {
+          match env::var(&name) {
+            Err(env::VarError::NotPresent) => None,
+            Err(env::VarError::NotUnicode(value)) => {
+              return Err(Error::EnvVarUnicode { name, value });
+            }
+            Ok(value) => Some(value),
+          }
+        };
+
+        variables.insert(name, value);
+      }
+
+      variables
+    } else {
+      environment.variables.clone()
+    };
+
+    let extra = extra
+      .as_ref()
+      .map(|extra| evaluator.evaluate_value(extra))
+      .transpose()?;
+
+    let inputs = inputs
+      .as_ref()
+      .map(|inputs| {
+        let inputs = evaluator.evaluate_value(inputs)?;
+        Cache::inputs(inputs, &working_directory)
+      })
+      .transpose()?;
+
+    let outputs = outputs
+      .as_ref()
+      .map(|outputs| -> RunResult<BTreeMap<String, Utf8PathBuf>> {
+        let outputs = evaluator.evaluate_value(outputs)?;
+        Ok(
+          outputs
+            .into_elements()
+            .into_iter()
+            .map(|output| (output.clone(), working_directory.join(output)))
+            .collect(),
+        )
+      })
+      .transpose()?
+      .unwrap_or_default();
+
+    let key = CacheKey {
+      body: evaluated_lines,
+      environment,
+      executor,
+      extension,
+      extra,
+      inputs,
+      positional: self
+        .takes_positional_arguments(&context.module.settings)
+        .then_some(positional),
+      recipe: self.recipe_path(),
+      working_directory: Some(&working_directory),
+    };
+
+    Ok(Some(cache.status(context.config, key, outputs)?))
+  }
+
+  pub(crate) fn run_script<'run>(
+    &self,
+    cache: &Cache,
+    context: &ExecutionContext<'src, 'run>,
+    env: &BTreeMap<String, String>,
+    mut evaluator: Evaluator<'src, 'run>,
+    positional: &[String],
+    scope: &Scope<'src, 'run>,
+  ) -> RunResult<'src> {
+    let config = &context.config;
+    let settings = &context.module.settings;
+
+    if let Some(format) = self.timestamp_format(config, &mut evaluator)? {
+      let timestamp =
+        datetime_format(chrono::Local::now(), &format).map_err(Error::DatetimeFormat)?;
+
+      let color = config.command_color_stderr();
+
+      eprintln!("[{}] {}", color.paint(&timestamp), self.name);
+    }
+
+    let mut evaluated_lines = Vec::new();
+    for line in &self.body {
+      evaluated_lines.push(evaluator.evaluate_line(line, false)?);
+    }
+
+    if config.verbosity.loud() && (settings.skip_recipes(config) || self.quiet) {
+      let color = config.command_color_stderr();
+
+      for line in &evaluated_lines {
+        eprintln!("{}", color.paint(line));
+      }
+    }
+
+    if settings.skip_recipes(config) {
+      return Ok(());
+    }
+
+    let executor = if self.attributes.contains(AttributeKind::Script) {
+      let Some(Attribute::Script(interpreter)) = self.attributes.get(AttributeKind::Script) else {
+        unreachable!();
+      };
+      Executor::Command(
+        interpreter
+          .as_ref()
+          .map(|interpreter| Interpreter {
+            command: interpreter.command.cooked.clone(),
+            arguments: interpreter
+              .arguments
+              .iter()
+              .map(|argument| argument.cooked.clone())
+              .collect(),
+          })
+          .or_else(|| context.module.settings.script_interpreter.clone())
+          .unwrap_or_else(|| Interpreter::default_script_interpreter().clone()),
+      )
+    } else if self.body.first().is_some_and(Line::is_shebang) {
+      let shebang = &evaluated_lines[0];
+      Executor::Shebang(Shebang::new(shebang).ok_or_else(|| Error::InvalidShebang {
+        recipe: self.name,
+        shebang: shebang.into(),
+      })?)
+    } else {
+      Executor::Command(
+        context
+          .module
+          .settings
+          .script_interpreter
+          .clone()
+          .unwrap_or_else(|| Interpreter::default_script_interpreter().clone()),
+      )
+    };
+
+    let working_directory = self.working_directory(context, &mut evaluator)?;
+
+    let mut environment =
+      Environment::new(context.dotenv, scope, settings, &context.module.unexports);
+
+    for (name, value) in env {
+      environment
+        .variables
+        .insert(name.clone(), Some(value.clone()));
+    }
+
+    let extension = self.attributes.iter().find_map(|attribute| {
+      if let Attribute::Extension(extension) = attribute {
+        Some(extension.cooked.as_str())
+      } else {
+        None
+      }
+    });
+
+    let cache_status = self.cache_status(
+      cache,
+      context,
+      &environment,
+      &evaluated_lines,
+      &mut evaluator,
+      &executor,
+      extension,
+      positional,
+      working_directory.as_deref(),
+    )?;
+
+    let cache_lock = match cache_status {
+      Some(CacheStatus::Hit) => return Ok(()),
+      Some(CacheStatus::Miss(lock)) => Some(lock),
+      None => None,
+    };
+
+    let tempdir = context.tempdir(self)?;
+
+    let mut path = dir::temporary_directory(&tempdir)?.to_owned();
+
+    path.push(executor.script_filename(self.name(), extension));
+
+    let mut script = executor.script(self, &evaluated_lines);
+
+    if config.verbosity.grandiloquent() {
+      eprintln!("{}", config.color.doc().stderr().paint(&script));
+    }
+
+    if executor.needs_bom() {
+      script.insert(0, '\u{FEFF}');
+    }
+
+    fs::write(&path, script).map_err(|error| Error::TempdirIo {
+      recipe: self.name(),
+      io_error: error,
+    })?;
+
+    let mut command = executor.command(config, &path, self.name(), working_directory.as_deref())?;
+
+    if self.takes_positional_arguments(settings) {
+      command.args(positional);
+    }
+
+    environment.export(&mut command);
+
+    // run it!
+    let (result, caught) = command.status_guard();
+
+    match result {
+      Ok(exit_status) => {
+        if let Some(code) = exit_status.code() {
+          if code != 0 {
+            return Err(Error::Code {
+              recipe: self.name(),
+              line_number: None,
+              code,
+              print_message: self.print_exit_message(settings),
+            });
+          }
+        } else {
+          return Err(Error::from_signal(
+            exit_status,
+            None,
+            self.print_exit_message(settings),
+            self.name(),
+          ));
+        }
+      }
+      Err(io_error) => return Err(executor.error(io_error, self.name())),
+    }
+
+    if let Some(signal) = caught {
+      if self.continue_on(signal) {
+        SignalHandler::clear();
+      } else {
+        return Err(Error::Interrupted { signal });
+      }
+    }
+
+    if let Some(cache_lock) = cache_lock {
+      cache_lock.save(self.name())?;
+    }
+
     Ok(())
+  }
+
+  pub(crate) fn groups(&self) -> BTreeSet<String> {
+    self
+      .attributes
+      .groups()
+      .into_iter()
+      .map(|group| group.cooked)
+      .collect()
+  }
+
+  pub(crate) fn doc(&self) -> Option<&str> {
+    self.doc.as_deref()
+  }
+
+  pub(crate) fn priors(&self) -> &[Dependency<'src>] {
+    &self.dependencies[..self.priors]
+  }
+
+  pub(crate) fn subsequents(&self) -> &[Dependency<'src>] {
+    &self.dependencies[self.priors..]
   }
 }
 
-impl<'src, D: Display> ColorDisplay for Recipe<'src, D> {
-  fn fmt(&self, f: &mut Formatter, color: Color) -> Result<(), fmt::Error> {
-    if let Some(doc) = self.doc {
-      writeln!(f, "# {}", doc)?;
-    }
-
+impl<D: Display> ColorDisplay for Recipe<'_, D> {
+  fn fmt(&self, f: &mut Formatter, color: Color) -> fmt::Result {
     if self.quiet {
       write!(f, "@{}", self.name)?;
     } else {
@@ -324,7 +772,11 @@ impl<'src, D: Display> ColorDisplay for Recipe<'src, D> {
         write!(f, " &&")?;
       }
 
-      write!(f, " {}", dependency)?;
+      write!(f, " {dependency}")?;
+    }
+
+    if let Some(trailing_comment) = self.trailing_comment {
+      write!(f, " {trailing_comment}")?;
     }
 
     for (i, line) in self.body.iter().enumerate() {
@@ -333,11 +785,11 @@ impl<'src, D: Display> ColorDisplay for Recipe<'src, D> {
       }
       for (j, fragment) in line.fragments.iter().enumerate() {
         if j == 0 {
-          write!(f, "    ")?;
+          write!(f, "{}", color.indentation())?;
         }
         match fragment {
           Fragment::Text { token } => write!(f, "{}", token.lexeme())?,
-          Fragment::Interpolation { expression, .. } => write!(f, "{{{{ {} }}}}", expression)?,
+          Fragment::Interpolation { expression, .. } => write!(f, "{{{{ {expression} }}}}")?,
         }
       }
       if i + 1 < self.body.len() {

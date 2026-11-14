@@ -1,4 +1,4 @@
-use crate::common::*;
+use super::*;
 
 #[derive(Debug, PartialEq, Clone, Copy, Ord, PartialOrd, Eq)]
 pub(crate) enum TokenKind {
@@ -6,13 +6,17 @@ pub(crate) enum TokenKind {
   Asterisk,
   At,
   Backtick,
+  Bang,
   BangEquals,
+  BangTilde,
+  BarBar,
   BraceL,
   BraceR,
   BracketL,
   BracketR,
   ByteOrderMark,
   Colon,
+  ColonColon,
   ColonEquals,
   Comma,
   Comment,
@@ -23,6 +27,9 @@ pub(crate) enum TokenKind {
   Equals,
   EqualsEquals,
   EqualsTilde,
+  FormatStringContinue,
+  FormatStringEnd,
+  FormatStringStart,
   Identifier,
   Indent,
   InterpolationEnd,
@@ -30,6 +37,9 @@ pub(crate) enum TokenKind {
   ParenL,
   ParenR,
   Plus,
+  PlusPlus,
+  QuestionMark,
+  Slash,
   StringToken,
   Text,
   Unspecified,
@@ -37,23 +47,27 @@ pub(crate) enum TokenKind {
 }
 
 impl Display for TokenKind {
-  fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
+  fn fmt(&self, f: &mut Formatter) -> fmt::Result {
     use TokenKind::*;
     write!(
       f,
       "{}",
-      match *self {
+      match self {
         AmpersandAmpersand => "'&&'",
         Asterisk => "'*'",
         At => "'@'",
         Backtick => "backtick",
+        Bang => "'!'",
         BangEquals => "'!='",
+        BangTilde => "'!~'",
+        BarBar => "'||'",
         BraceL => "'{'",
         BraceR => "'}'",
         BracketL => "'['",
         BracketR => "']'",
         ByteOrderMark => "byte order mark",
         Colon => "':'",
+        ColonColon => "'::'",
         ColonEquals => "':='",
         Comma => "','",
         Comment => "comment",
@@ -64,6 +78,9 @@ impl Display for TokenKind {
         Equals => "'='",
         EqualsEquals => "'=='",
         EqualsTilde => "'=~'",
+        FormatStringContinue => "format string continue",
+        FormatStringEnd => "format string end",
+        FormatStringStart => "format string",
         Identifier => "identifier",
         Indent => "indent",
         InterpolationEnd => "'}}'",
@@ -71,6 +88,9 @@ impl Display for TokenKind {
         ParenL => "'('",
         ParenR => "')'",
         Plus => "'+'",
+        PlusPlus => "'++'",
+        QuestionMark => "?",
+        Slash => "'/'",
         StringToken => "string",
         Text => "command text",
         Unspecified => "unspecified",

@@ -1,151 +1,208 @@
-use crate::common::*;
+use super::*;
 
-test! {
-  name: success,
-  justfile: "
-    foo: && bar
-      echo foo
+#[test]
+fn success() {
+  Test::new()
+    .justfile(
+      "
+        foo: && bar
+          echo foo
 
-    bar:
-      echo bar
-  ",
-  stdout: "
-    foo
-    bar
-  ",
-  stderr: "
-    echo foo
-    echo bar
-  ",
+        bar:
+          echo bar
+      ",
+    )
+    .stdout(
+      "
+        foo
+        bar
+      ",
+    )
+    .stderr(
+      "
+        echo foo
+        echo bar
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: failure,
-  justfile: "
-    foo: && bar
-      echo foo
-      false
+#[test]
+fn failure() {
+  Test::new()
+    .justfile(
+      "
+        foo: && bar
+          echo foo
+          false
 
-    bar:
-      echo bar
-  ",
-  stdout: "
-    foo
-  ",
-  stderr: "
-    echo foo
-    false
-    error: Recipe `foo` failed on line 3 with exit code 1
-  ",
-  status: EXIT_FAILURE,
+        bar:
+          echo bar
+      ",
+    )
+    .stdout(
+      "
+        foo
+      ",
+    )
+    .stderr(
+      "
+        echo foo
+        false
+        error: recipe `foo` failed on line 3 with exit code 1
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: circular_dependency,
-  justfile: "
-    foo: && foo
-  ",
-  stderr: "
-    error: Recipe `foo` depends on itself
-      |
-    1 | foo: && foo
-      |         ^^^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn circular_dependency() {
+  Test::new()
+    .justfile(
+      "
+        foo: && foo
+      ",
+    )
+    .stderr(
+      "
+        error: recipe `foo` depends on itself
+         ——▶ justfile:1:9
+          │
+        1 │ foo: && foo
+          │         ^^^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: unknown,
-  justfile: "
-    foo: && bar
-  ",
-  stderr: "
-    error: Recipe `foo` has unknown dependency `bar`
-      |
-    1 | foo: && bar
-      |         ^^^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn unknown() {
+  Test::new()
+    .justfile(
+      "
+        foo: && bar
+      ",
+    )
+    .stderr(
+      "
+        error: recipe `foo` has unknown dependency `bar`
+         ——▶ justfile:1:9
+          │
+        1 │ foo: && bar
+          │         ^^^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: unknown_argument,
-  justfile: "
-    bar x:
+#[test]
+fn unknown_argument() {
+  Test::new()
+    .justfile(
+      "
+        bar x:
 
-    foo: && (bar y)
-  ",
-  stderr: "
-    error: Variable `y` not defined
-      |
-    3 | foo: && (bar y)
-      |              ^
-  ",
-  status: EXIT_FAILURE,
+        foo: && (bar y)
+      ",
+    )
+    .stderr(
+      "
+        error: variable `y` not defined
+         ——▶ justfile:3:14
+          │
+        3 │ foo: && (bar y)
+          │              ^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: argument,
-  justfile: "
-    foo: && (bar 'hello')
+#[test]
+fn argument() {
+  Test::new()
+    .justfile(
+      "
+        foo: && (bar 'hello')
 
-    bar x:
-      echo {{ x }}
-  ",
-  stdout: "
-    hello
-  ",
-  stderr: "
-    echo hello
-  ",
+        bar x:
+          echo {{ x }}
+      ",
+    )
+    .stdout(
+      "
+        hello
+      ",
+    )
+    .stderr(
+      "
+        echo hello
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: duplicate_subsequents_dont_run,
-  justfile: "
-    a: && b c
-      echo a
+#[test]
+fn duplicate_subsequents_dont_run() {
+  Test::new()
+    .justfile(
+      "
+        a: && b c
+          echo a
 
-    b: d
-      echo b
+        b: d
+          echo b
 
-    c: d
-      echo c
+        c: d
+          echo c
 
-    d:
-      echo d
-  ",
-  stdout: "
-    a
-    d
-    b
-    c
-  ",
-  stderr: "
-    echo a
-    echo d
-    echo b
-    echo c
-  ",
+        d:
+          echo d
+      ",
+    )
+    .stdout(
+      "
+        a
+        d
+        b
+        c
+      ",
+    )
+    .stderr(
+      "
+        echo a
+        echo d
+        echo b
+        echo c
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: subsequents_run_even_if_already_ran_as_prior,
-  justfile: "
-    a: b && b
-      echo a
+#[test]
+fn subsequents_run_even_if_already_ran_as_prior() {
+  Test::new()
+    .justfile(
+      "
+        a: b && b
+          echo a
 
-    b:
-      echo b
-  ",
-  stdout: "
-    b
-    a
-    b
-  ",
-  stderr: "
-    echo b
-    echo a
-    echo b
-  ",
+        b:
+          echo b
+      ",
+    )
+    .stdout(
+      "
+        b
+        a
+        b
+      ",
+    )
+    .stderr(
+      "
+        echo b
+        echo a
+        echo b
+      ",
+    )
+    .success();
 }

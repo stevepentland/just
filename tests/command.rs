@@ -1,98 +1,162 @@
-use crate::common::*;
+use super::*;
 
-test! {
-  name: long,
-  justfile: "
-    x:
-      echo XYZ
-  ",
-  args: ("--command", "printf", "foo"),
-  stdout: "foo",
+#[test]
+fn long() {
+  Test::new()
+    .arg("--command")
+    .arg("printf")
+    .arg("foo")
+    .justfile(
+      "
+        x:
+          echo XYZ
+      ",
+    )
+    .stdout("foo")
+    .success();
 }
 
-test! {
-  name: short,
-  justfile: "
-    x:
-      echo XYZ
-  ",
-  args: ("-c", "printf", "foo"),
-  stdout: "foo",
+#[test]
+fn short() {
+  Test::new()
+    .arg("-c")
+    .arg("printf")
+    .arg("foo")
+    .justfile(
+      "
+        x:
+          echo XYZ
+      ",
+    )
+    .stdout("foo")
+    .success();
 }
 
-test! {
-  name: no_binary,
-  justfile: "
-    x:
-      echo XYZ
-  ",
-  args: ("--command"),
-  stderr: &format!("
-    error: The argument '--command <COMMAND>' requires a value but none was supplied
-
-    USAGE:
-        just{} --color <COLOR> --dump-format <FORMAT> --shell <SHELL> --shell-arg <SHELL-ARG>... \
-        <--changelog|--choose|--command <COMMAND>|--completions <SHELL>|--dump|--edit|\
-        --evaluate|--fmt|--init|--list|--show <RECIPE>|--summary|--variables>
-
-    For more information try --help
-  ", EXE_SUFFIX),
-  status: EXIT_FAILURE,
+#[test]
+fn command_color() {
+  Test::new()
+    .arg("--color")
+    .arg("always")
+    .arg("--command-color")
+    .arg("cyan")
+    .justfile(
+      "
+        x:
+          echo XYZ
+      ",
+    )
+    .stdout("XYZ\n")
+    .stderr("\u{1b}[1;36mecho XYZ\u{1b}[0m\n")
+    .success();
 }
 
-test! {
-  name: env_is_loaded,
-  justfile: "
-    x:
-      echo XYZ
-  ",
-  args: ("--command", "sh", "-c", "printf $DOTENV_KEY"),
-  stdout: "dotenv-value",
+#[test]
+fn no_binary() {
+  Test::new()
+    .arg("--command")
+    .justfile(
+      "
+        x:
+          echo XYZ
+      ",
+    )
+    .stderr(
+      "
+        error: a value is required for '--command <COMMAND>...' but none was supplied
+
+        For more information, try '--help'.
+      ",
+    )
+    .status(2);
 }
 
-test! {
-  name: exports_are_available,
-  justfile: "
-    export FOO := 'bar'
+#[test]
+fn env_is_loaded() {
+  Test::new()
+    .justfile(
+      "
+        set dotenv-load
 
-    x:
-      echo XYZ
-  ",
-  args: ("--command", "sh", "-c", "printf $FOO"),
-  stdout: "bar",
+        x:
+          echo XYZ
+      ",
+    )
+    .args(["--command", "sh", "-c", "printf $DOTENV_KEY"])
+    .write(".env", "DOTENV_KEY=dotenv-value")
+    .stdout("dotenv-value")
+    .success();
 }
 
-test! {
-  name: set_overrides_work,
-  justfile: "
-    export FOO := 'bar'
+#[test]
+fn exports_are_available() {
+  Test::new()
+    .arg("--command")
+    .arg("sh")
+    .arg("-c")
+    .arg("printf $FOO")
+    .justfile(
+      "
+        export FOO := 'bar'
 
-    x:
-      echo XYZ
-  ",
-  args: ("--set", "FOO", "baz", "--command", "sh", "-c", "printf $FOO"),
-  stdout: "baz",
+        x:
+          echo XYZ
+      ",
+    )
+    .stdout("bar")
+    .success();
 }
 
-test! {
-  name: run_in_shell,
-  justfile: "
-    set shell := ['printf']
-  ",
-  args: ("--shell-command", "--command", "bar baz"),
-  stdout: "bar baz",
-  shell: false,
+#[test]
+fn set_overrides_work() {
+  Test::new()
+    .arg("--set")
+    .arg("FOO")
+    .arg("baz")
+    .arg("--command")
+    .arg("sh")
+    .arg("-c")
+    .arg("printf $FOO")
+    .justfile(
+      "
+        export FOO := 'bar'
+
+        x:
+          echo XYZ
+      ",
+    )
+    .stdout("baz")
+    .success();
 }
 
-test! {
-  name: exit_status,
-  justfile: "
-    x:
-      echo XYZ
-  ",
-  args: ("--command", "false"),
-  stderr_regex: "error: Command `false` failed: exit (code|status): 1\n",
-  status: EXIT_FAILURE,
+#[test]
+fn run_in_shell() {
+  Test::new()
+    .arg("--shell-command")
+    .arg("--command")
+    .arg("bar baz")
+    .justfile(
+      "
+        set shell := ['printf']
+      ",
+    )
+    .stdout("bar baz")
+    .shell(false)
+    .success();
+}
+
+#[test]
+fn exit_status() {
+  Test::new()
+    .arg("--command")
+    .arg("false")
+    .justfile(
+      "
+        x:
+          echo XYZ
+      ",
+    )
+    .stderr_regex("error: command `false` failed: exit (code|status): 1\n")
+    .failure();
 }
 
 #[test]
@@ -103,8 +167,8 @@ fn working_directory_is_correct() {
   fs::write(tmp.path().join("bar"), "baz").unwrap();
   fs::create_dir(tmp.path().join("foo")).unwrap();
 
-  let output = Command::new(&executable_path("just"))
-    .args(&["--command", "cat", "bar"])
+  let output = just()
+    .args(["--command", "cat", "bar"])
     .current_dir(tmp.path().join("foo"))
     .output()
     .unwrap();
@@ -118,18 +182,41 @@ fn working_directory_is_correct() {
 
 #[test]
 fn command_not_found() {
-  let tmp = tempdir();
+  Test::new()
+    .justfile("")
+    .args(["--command", "asdfasdfasdfasdfadfsadsfadsf", "bar"])
+    .stderr_regex("error: failed to invoke `asdfasdfasdfasdfadfsadsfadsf` `bar`: .*")
+    .failure();
+}
 
-  fs::write(tmp.path().join("justfile"), "").unwrap();
+#[test]
+fn dont_evaluate_unnecessary_variables() {
+  Test::new()
+    .justfile(
+      "
+        export x := 'FOO'
 
-  let output = Command::new(&executable_path("just"))
-    .args(&["--command", "asdfasdfasdfasdfadfsadsfadsf", "bar"])
-    .output()
-    .unwrap();
+        y := `exit 1`
+      ",
+    )
+    .args(["--command", "bash", "-c", "echo $x"])
+    .stdout("FOO\n")
+    .success();
+}
 
-  assert!(str::from_utf8(&output.stderr)
-    .unwrap()
-    .starts_with("error: Failed to invoke `asdfasdfasdfasdfadfsadsfadsf` `bar`:"));
-
-  assert!(!output.status.success());
+#[test]
+fn command_exit_code_is_propagated() {
+  Test::new()
+    .justfile(
+      "
+        foo:
+      ",
+    )
+    .args(["--command", "sh", "-c", "exit 42"])
+    .stderr(if cfg!(windows) {
+      "error: command `sh` `-c` `exit 42` failed: exit code: 42\n"
+    } else {
+      "error: command `sh` `-c` `exit 42` failed: exit status: 42\n"
+    })
+    .status(42);
 }

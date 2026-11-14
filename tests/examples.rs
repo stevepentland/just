@@ -1,4 +1,4 @@
-use crate::common::*;
+use super::*;
 
 #[test]
 fn examples() {
@@ -8,7 +8,7 @@ fn examples() {
 
     println!("Parsing `{}`…", path.display());
 
-    let output = Command::new(executable_path("just"))
+    let output = just()
       .arg("--justfile")
       .arg(&path)
       .arg("--dump")

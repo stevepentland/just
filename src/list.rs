@@ -1,35 +1,32 @@
-// `Self` cannot be used where type takes generic arguments
-#![allow(clippy::use_self)]
+use super::*;
 
-use crate::common::*;
-
-pub struct List<T: Display, I: Iterator<Item = T> + Clone> {
+pub(crate) struct List<T: Display, I: Iterator<Item = T> + Clone> {
   conjunction: &'static str,
   values: I,
 }
 
 impl<T: Display, I: Iterator<Item = T> + Clone> List<T, I> {
-  pub fn or<II: IntoIterator<Item = T, IntoIter = I>>(values: II) -> List<T, I> {
-    List {
+  pub(crate) fn or<II: IntoIterator<Item = T, IntoIter = I>>(values: II) -> Self {
+    Self {
       conjunction: "or",
       values: values.into_iter(),
     }
   }
 
-  pub fn and<II: IntoIterator<Item = T, IntoIter = I>>(values: II) -> List<T, I> {
-    List {
+  pub(crate) fn and<II: IntoIterator<Item = T, IntoIter = I>>(values: II) -> Self {
+    Self {
       conjunction: "and",
       values: values.into_iter(),
     }
   }
 
-  pub fn or_ticked<II: IntoIterator<Item = T, IntoIter = I>>(
+  pub(crate) fn or_ticked<II: IntoIterator<Item = T, IntoIter = I>>(
     values: II,
   ) -> List<Enclosure<T>, impl Iterator<Item = Enclosure<T>> + Clone> {
     List::or(values.into_iter().map(Enclosure::tick))
   }
 
-  pub fn and_ticked<II: IntoIterator<Item = T, IntoIter = I>>(
+  pub(crate) fn and_ticked<II: IntoIterator<Item = T, IntoIter = I>>(
     values: II,
   ) -> List<Enclosure<T>, impl Iterator<Item = Enclosure<T>> + Clone> {
     List::and(values.into_iter().map(Enclosure::tick))
@@ -41,7 +38,7 @@ impl<T: Display, I: Iterator<Item = T> + Clone> Display for List<T, I> {
     let mut values = self.values.clone().fuse();
 
     if let Some(first) = values.next() {
-      write!(f, "{}", first)?;
+      write!(f, "{first}")?;
     } else {
       return Ok(());
     }
@@ -55,7 +52,7 @@ impl<T: Display, I: Iterator<Item = T> + Clone> Display for List<T, I> {
     let third = values.next();
 
     if let (Some(second), None) = (second.as_ref(), third.as_ref()) {
-      write!(f, " {} {}", self.conjunction, second)?;
+      write!(f, " {} {second}", self.conjunction)?;
       return Ok(());
     }
 
@@ -65,12 +62,12 @@ impl<T: Display, I: Iterator<Item = T> + Clone> Display for List<T, I> {
     loop {
       match (current, next) {
         (Some(c), Some(n)) => {
-          write!(f, ", {}", c)?;
+          write!(f, ", {c}")?;
           current = Some(n);
           next = values.next();
         }
         (Some(c), None) => {
-          write!(f, ", {} {}", self.conjunction, c)?;
+          write!(f, ", {} {c}", self.conjunction)?;
           return Ok(());
         }
         _ => unreachable!("Iterator was fused, but returned Some after None"),

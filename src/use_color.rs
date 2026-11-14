@@ -1,6 +1,9 @@
-#[derive(Copy, Clone, Debug, PartialEq)]
+use super::*;
+
+#[derive(Copy, Clone, Debug, Default, PartialEq, ValueEnum)]
 pub(crate) enum UseColor {
-  Auto,
   Always,
+  #[default]
+  Auto,
   Never,
 }

@@ -1,101 +1,351 @@
-use crate::common::*;
+use super::*;
 
-test! {
-  name:     show,
-  justfile: r#"hello := "foo"
+#[test]
+fn search_directory_without_recipe() {
+  Test::new()
+    .justfile("foo:")
+    .args(["--show", "."])
+    .stderr("error: `--show` requires recipe\n")
+    .failure();
+}
+
+#[test]
+fn show() {
+  Test::new()
+    .arg("--show")
+    .arg("recipe")
+    .justfile(
+      "hello := 'foo'
 bar := hello + hello
 recipe:
- echo {{hello + "bar" + bar}}"#,
-  args:     ("--show", "recipe"),
-  stdout:   r#"
-    recipe:
-        echo {{ hello + "bar" + bar }}
-  "#,
+ echo {{hello + 'bar' + bar}}",
+    )
+    .stdout(
+      "
+        recipe:
+            echo {{ hello + 'bar' + bar }}
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: alias_show,
-  justfile: "foo:\n    bar\nalias f := foo",
-  args: ("--show", "f"),
-  stdout: "
-    alias f := foo
-    foo:
-        bar
-  ",
+#[test]
+fn alias_show() {
+  Test::new()
+    .arg("--show")
+    .arg("f")
+    .justfile("foo:\n    bar\nalias f := foo")
+    .stdout(
+      "
+        alias f := foo
+        foo:
+            bar
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: alias_show_missing_target,
-  justfile: "alias f := foo",
-  args: ("--show", "f"),
-  stderr: "
-    error: Alias `f` has an unknown target `foo`
-      |
-    1 | alias f := foo
-      |       ^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn alias_show_missing_target() {
+  Test::new()
+    .arg("--show")
+    .arg("f")
+    .justfile("alias f := foo")
+    .stderr(
+      "
+        error: alias `f` has an unknown target `foo`
+         ——▶ justfile:1:7
+          │
+        1 │ alias f := foo
+          │       ^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name:     show_suggestion,
-  justfile: r#"
-hello a b='B	' c='C':
-  echo {{a}} {{b}} {{c}}
+#[test]
+fn show_suggestion() {
+  Test::new()
+    .arg("--show")
+    .arg("hell")
+    .justfile(
+      "
+        hello:
 
-a Z="\t z":
-"#,
-  args:     ("--show", "hell"),
-  stdout:   "",
-  stderr:   "error: Justfile does not contain recipe `hell`.\nDid you mean `hello`?\n",
-  status:   EXIT_FAILURE,
+        a:
+      ",
+    )
+    .stderr("error: justfile does not contain recipe `hell`\nDid you mean `hello`?\n")
+    .failure();
 }
 
-test! {
-  name:     show_alias_suggestion,
-  justfile: r#"
-hello a b='B	' c='C':
-  echo {{a}} {{b}} {{c}}
+#[test]
+fn show_alias_suggestion() {
+  Test::new()
+    .arg("--show")
+    .arg("fo")
+    .justfile(
+      "
+        hello:
 
-alias foo := hello
+        alias foo := hello
 
-a Z="\t z":
-"#,
-  args:     ("--show", "fo"),
-  stdout:   "",
-  stderr:   "
-    error: Justfile does not contain recipe `fo`.
-    Did you mean `foo`, an alias for `hello`?
-  ",
-  status:   EXIT_FAILURE,
+        a:
+      ",
+    )
+    .stderr(
+      "
+        error: justfile does not contain recipe `fo`
+        Did you mean `foo`, an alias for `hello`?
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name:     show_no_suggestion,
-  justfile: r#"
-helloooooo a b='B	' c='C':
-  echo {{a}} {{b}} {{c}}
+#[test]
+fn show_no_suggestion() {
+  Test::new()
+    .arg("--show")
+    .arg("hell")
+    .justfile(
+      "
+        helloooooo:
 
-a Z="\t z":
-"#,
-  args:     ("--show", "hell"),
-  stdout:   "",
-  stderr:   "error: Justfile does not contain recipe `hell`.\n",
-  status:   EXIT_FAILURE,
+        a:
+      ",
+    )
+    .stderr("error: justfile does not contain recipe `hell`\n")
+    .failure();
 }
 
-test! {
-  name:     show_no_alias_suggestion,
-  justfile: r#"
-hello a b='B	' c='C':
-  echo {{a}} {{b}} {{c}}
+#[test]
+fn show_no_alias_suggestion() {
+  Test::new()
+    .arg("--show")
+    .arg("fooooooo")
+    .justfile(
+      "
+        hello:
 
-alias foo := hello
+        alias foo := hello
 
-a Z="\t z":
-"#,
-  args:     ("--show", "fooooooo"),
-  stdout:   "",
-  stderr:   "error: Justfile does not contain recipe `fooooooo`.\n",
-  status:   EXIT_FAILURE,
+        a:
+      ",
+    )
+    .stderr("error: justfile does not contain recipe `fooooooo`\n")
+    .failure();
+}
+
+#[test]
+fn show_recipe_at_path() {
+  Test::new()
+    .write(
+      "foo.just",
+      "
+        bar:
+         @echo MODULE
+      ",
+    )
+    .justfile(
+      "
+        mod foo
+      ",
+    )
+    .args(["--show", "foo::bar"])
+    .stdout("bar:\n    @echo MODULE\n")
+    .success();
+}
+
+#[test]
+fn show_invalid_path() {
+  Test::new()
+    .args(["--show", "$hello"])
+    .stderr("error: invalid module path `$hello`\n")
+    .failure();
+}
+
+#[test]
+fn show_space_separated_path() {
+  Test::new()
+    .write(
+      "foo.just",
+      "
+        bar:
+         @echo MODULE
+      ",
+    )
+    .justfile(
+      "
+        mod foo
+      ",
+    )
+    .args(["--show", "foo bar"])
+    .stdout("bar:\n    @echo MODULE\n")
+    .success();
+}
+
+#[test]
+fn show_recipe_in_search_directory() {
+  Test::new()
+    .justfile("foo:\n @echo ROOT")
+    .write(
+      "child/justfile",
+      "
+        foo:
+         @echo CHILD
+      ",
+    )
+    .current_dir("child")
+    .args(["--show", "../foo"])
+    .stdout("foo:\n    @echo ROOT\n")
+    .success();
+}
+
+#[test]
+fn show_cross_module_dependencies() {
+  Test::new()
+    .justfile(
+      "
+        mod sub
+
+        foo: sub::deep
+            @echo foo
+      ",
+    )
+    .write(
+      "sub.just",
+      "
+        deep:
+            @echo deep
+      ",
+    )
+    .args(["--show", "foo"])
+    .stdout(
+      "
+        foo: sub::deep
+            @echo foo
+      ",
+    )
+    .success();
+}
+
+#[test]
+fn show_prints_full_recipe_path_for_cross_module_alias() {
+  Test::new()
+    .write("foo.just", "bar:\n  @echo SUB\n")
+    .justfile(
+      "
+        mod foo
+
+        alias f := foo::bar
+
+        bar:
+          @echo ROOT
+      ",
+    )
+    .args(["--show", "f"])
+    .stdout(
+      "
+        alias f := foo::bar
+        bar:
+            @echo SUB
+      ",
+    )
+    .success();
+}
+
+#[test]
+fn show_prints_doc_comment_and_attributes() {
+  Test::new()
+    .justfile(
+      "
+        # baz
+        [no-cd]
+        foo:
+      ",
+    )
+    .args(["--show", "foo"])
+    .stdout(
+      "
+        # baz
+        [no-cd]
+        foo:
+      ",
+    )
+    .success();
+}
+
+#[test]
+fn show_prints_doc_attribute_without_doc_comment() {
+  Test::new()
+    .justfile(
+      "
+        [doc('bar')]
+        foo:
+      ",
+    )
+    .args(["--show", "foo"])
+    .stdout(
+      "
+        [doc('bar')]
+        foo:
+      ",
+    )
+    .success();
+}
+
+#[test]
+fn show_prints_bare_dependency_on_parameterized_recipe_without_parentheses() {
+  Test::new()
+    .justfile(
+      "
+        foo bar='baz':
+            @echo {{ bar }}
+
+        baz: foo
+            @echo baz
+      ",
+    )
+    .args(["--show", "baz"])
+    .stdout(
+      "
+        baz: foo
+            @echo baz
+      ",
+    )
+    .success();
+}
+
+#[test]
+fn show_recipe_disabled_by_absent_module() {
+  Test::new()
+    .justfile(
+      "
+        mod? foo
+
+        bar: foo::baz
+          @echo bar
+      ",
+    )
+    .args(["--show", "bar"])
+    .stderr("error: recipe `bar` depends on absent module `foo`\n")
+    .failure();
+}
+
+#[test]
+fn show_alias_disabled_by_absent_module() {
+  Test::new()
+    .justfile(
+      "
+        mod? foo
+
+        alias b := bar
+
+        bar: foo::baz
+          @echo bar
+      ",
+    )
+    .args(["--show", "b"])
+    .stderr("error: alias `b` depends on absent module `foo`\n")
+    .failure();
 }

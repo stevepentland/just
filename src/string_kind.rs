@@ -1,16 +1,9 @@
-use crate::common::*;
+use super::*;
 
 #[derive(Debug, PartialEq, Clone, Copy, Ord, PartialOrd, Eq)]
 pub(crate) struct StringKind {
-  delimiter: StringDelimiter,
-  indented: bool,
-}
-
-#[derive(Debug, PartialEq, Clone, Copy, Ord, PartialOrd, Eq)]
-enum StringDelimiter {
-  Backtick,
-  QuoteDouble,
-  QuoteSingle,
+  pub(crate) delimiter: StringDelimiter,
+  pub(crate) indented: bool,
 }
 
 impl StringKind {
@@ -78,18 +71,15 @@ impl StringKind {
   pub(crate) fn from_string_or_backtick(token: Token) -> CompileResult<Self> {
     Self::from_token_start(token.lexeme()).ok_or_else(|| {
       token.error(CompileErrorKind::Internal {
-        message: "StringKind::from_token: Expected String or Backtick".to_owned(),
+        message: "StringKind::from_token: expected string or backtick".to_owned(),
       })
     })
   }
 
   pub(crate) fn from_token_start(token_start: &str) -> Option<Self> {
-    for &kind in Self::ALL {
-      if token_start.starts_with(kind.delimiter()) {
-        return Some(kind);
-      }
-    }
-
-    None
+    Self::ALL
+      .iter()
+      .find(|&&kind| token_start.starts_with(kind.delimiter()))
+      .copied()
   }
 }

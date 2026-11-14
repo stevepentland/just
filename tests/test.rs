@@ -1,51 +1,22 @@
-use crate::common::*;
+use {
+  super::*,
+  pretty_assertions::{StrComparison, assert_eq},
+};
 
-use pretty_assertions::assert_eq;
-
-macro_rules! test {
-  {
-    name: $name:ident,
-    $(justfile: $justfile:expr,)?
-    $(args: ($($arg:tt),*),)?
-    $(env: { $($env_key:literal : $env_value:literal,)* },)?
-    $(stdin: $stdin:expr,)?
-    $(stdout: $stdout:expr,)?
-    $(stderr: $stderr:expr,)?
-    $(stderr_regex: $stderr_regex:expr,)?
-    $(status: $status:expr,)?
-    $(shell: $shell:expr,)?
-  } => {
-    #[test]
-    fn $name() {
-      let test = crate::test::Test::new();
-
-      $($(let test = test.arg($arg);)*)?
-      $($(let test = test.env($env_key, $env_value);)*)?
-      $(let test = test.justfile($justfile);)?
-      $(let test = test.shell($shell);)?
-      $(let test = test.status($status);)?
-      $(let test = test.stderr($stderr);)?
-      $(let test = test.stderr_regex($stderr_regex);)?
-      $(let test = test.stdin($stdin);)?
-      $(let test = test.stdout($stdout);)?
-
-      test.run();
-    }
-  }
-}
-
+#[must_use]
 pub(crate) struct Test {
   pub(crate) args: Vec<String>,
   pub(crate) current_dir: PathBuf,
   pub(crate) env: BTreeMap<String, String>,
+  pub(crate) expected_files: BTreeMap<PathBuf, Vec<u8>>,
   pub(crate) justfile: Option<String>,
+  pub(crate) response: Option<Response>,
   pub(crate) shell: bool,
-  pub(crate) status: i32,
   pub(crate) stderr: String,
   pub(crate) stderr_regex: Option<Regex>,
   pub(crate) stdin: String,
   pub(crate) stdout: String,
-  pub(crate) suppress_dotenv_load_warning: bool,
+  pub(crate) stdout_regex: Option<Regex>,
   pub(crate) tempdir: TempDir,
   pub(crate) unindent_stdout: bool,
 }
@@ -60,14 +31,15 @@ impl Test {
       args: Vec::new(),
       current_dir: PathBuf::new(),
       env: BTreeMap::new(),
-      justfile: Some(String::new()),
+      expected_files: BTreeMap::new(),
+      justfile: None,
+      response: None,
       shell: true,
-      status: EXIT_SUCCESS,
       stderr: String::new(),
       stderr_regex: None,
       stdin: String::new(),
       stdout: String::new(),
-      suppress_dotenv_load_warning: true,
+      stdout_regex: None,
       tempdir,
       unindent_stdout: true,
     }
@@ -78,21 +50,35 @@ impl Test {
     self
   }
 
-  pub(crate) fn args(mut self, args: &[&str]) -> Self {
-    for arg in args {
+  pub(crate) fn args<'a>(mut self, args: impl AsRef<[&'a str]>) -> Self {
+    for arg in args.as_ref() {
       self = self.arg(arg);
     }
     self
   }
 
-  pub(crate) fn current_dir(mut self, path: impl AsRef<Path>) -> Self {
-    self.current_dir = path.as_ref().to_owned();
+  pub(crate) fn create_dir(self, path: impl AsRef<Path>) -> Self {
+    fs::create_dir_all(self.tempdir.path().join(path)).unwrap();
     self
+  }
+
+  pub(crate) fn current_dir(mut self, path: impl AsRef<Path>) -> Self {
+    path.as_ref().clone_into(&mut self.current_dir);
+    self
+  }
+
+  pub(crate) fn path(self, path: impl AsRef<Path>) -> Self {
+    let value = self.tempdir.path().join(path).to_str().unwrap().to_owned();
+    self.env("PATH", &value)
   }
 
   pub(crate) fn env(mut self, key: &str, val: &str) -> Self {
     self.env.insert(key.to_string(), val.to_string());
     self
+  }
+
+  pub(crate) fn unstable(self) -> Self {
+    self.env("JUST_UNSTABLE", "1")
   }
 
   pub(crate) fn justfile(mut self, justfile: impl Into<String>) -> Self {
@@ -104,18 +90,31 @@ impl Test {
     self.tempdir.path().join("justfile")
   }
 
-  pub(crate) fn no_justfile(mut self) -> Self {
-    self.justfile = None;
+  #[track_caller]
+  pub(crate) fn symlink(self, original: &str, link: &str) -> Self {
+    let original = self.tempdir.path().join(original);
+    let link = self.tempdir.path().join(link);
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(original, link).unwrap();
+
+    #[cfg(windows)]
+    if original.is_dir() {
+      std::os::windows::fs::symlink_dir(original, link).unwrap();
+    } else {
+      std::os::windows::fs::symlink_file(original, link).unwrap();
+    }
+
     self
+  }
+
+  pub(crate) fn response(mut self, response: Response) -> Self {
+    self.response = Some(response);
+    self.stdout_regex(".*")
   }
 
   pub(crate) fn shell(mut self, shell: bool) -> Self {
     self.shell = shell;
-    self
-  }
-
-  pub(crate) fn status(mut self, exit_status: i32) -> Self {
-    self.status = exit_status;
     self
   }
 
@@ -125,7 +124,7 @@ impl Test {
   }
 
   pub(crate) fn stderr_regex(mut self, stderr_regex: impl AsRef<str>) -> Self {
-    self.stderr_regex = Some(Regex::new(&format!("^{}$", stderr_regex.as_ref())).unwrap());
+    self.stderr_regex = Some(Regex::new(&format!("^(?s){}$", stderr_regex.as_ref())).unwrap());
     self
   }
 
@@ -139,14 +138,8 @@ impl Test {
     self
   }
 
-  pub(crate) fn suppress_dotenv_load_warning(mut self, suppress_dotenv_load_warning: bool) -> Self {
-    self.suppress_dotenv_load_warning = suppress_dotenv_load_warning;
-    self
-  }
-
-  pub(crate) fn tree(self, mut tree: Tree) -> Self {
-    tree.map(|_name, content| unindent(content));
-    tree.instantiate(&self.tempdir.path()).unwrap();
+  pub(crate) fn stdout_regex(mut self, stdout_regex: impl AsRef<str>) -> Self {
+    self.stdout_regex = Some(Regex::new(&format!("(?s)^{}$", stdout_regex.as_ref())).unwrap());
     self
   }
 
@@ -154,10 +147,78 @@ impl Test {
     self.unindent_stdout = unindent_stdout;
     self
   }
-}
 
-impl Test {
-  pub(crate) fn run(self) -> TempDir {
+  pub(crate) fn write(self, path: impl AsRef<Path>, content: &str) -> Self {
+    let path = self.tempdir.path().join(path);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, unindent(content)).unwrap();
+    self
+  }
+
+  pub(crate) fn write_executable(self, path: impl AsRef<Path> + Copy, content: &str) -> Self {
+    self.write(path, content).make_executable(path)
+  }
+
+  pub(crate) fn make_executable(self, path: impl AsRef<Path>) -> Self {
+    let file = self.tempdir.path().join(path);
+
+    // Make sure it exists first, as a sanity check.
+    assert!(file.exists(), "file does not exist: {}", file.display());
+
+    // Windows uses file extensions to determine whether a file is executable.
+    // Other systems don't care. To keep these tests cross-platform, just make
+    // sure all executables end with ".exe" suffix.
+    assert!(
+      file.extension() == Some("exe".as_ref()),
+      "executable file does not end with .exe: {}",
+      file.display()
+    );
+
+    #[cfg(unix)]
+    {
+      let perms = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+      fs::set_permissions(file, perms).unwrap();
+    }
+
+    self
+  }
+
+  pub(crate) fn expect_file(mut self, path: impl AsRef<Path>, content: impl AsRef<[u8]>) -> Self {
+    let path = path.as_ref();
+    self
+      .expected_files
+      .insert(path.into(), content.as_ref().into());
+    self
+  }
+
+  #[track_caller]
+  pub(crate) fn success(self) -> Output {
+    self.status(0)
+  }
+
+  #[track_caller]
+  pub(crate) fn failure(self) -> Output {
+    self.status(1)
+  }
+
+  #[track_caller]
+  pub(crate) fn status(self, status: i32) -> Output {
+    fn compare<T: PartialEq + Debug>(name: &str, have: T, want: T) -> bool {
+      let equal = have == want;
+      if !equal {
+        eprintln!("Bad {name}: {}", Comparison::new(&have, &want));
+      }
+      equal
+    }
+
+    fn compare_string(name: &str, have: &str, want: &str) -> bool {
+      let equal = have == want;
+      if !equal {
+        eprintln!("Bad {name}: {}", StrComparison::new(&have, &want));
+      }
+      equal
+    }
+
     if let Some(justfile) = &self.justfile {
       let justfile = unindent(justfile);
       fs::write(self.justfile_path(), justfile).unwrap();
@@ -166,37 +227,28 @@ impl Test {
     let stdout = if self.unindent_stdout {
       unindent(&self.stdout)
     } else {
-      self.stdout
+      self.stdout.clone()
     };
+
     let stderr = unindent(&self.stderr);
 
-    let mut dotenv_path = self.tempdir.path().to_path_buf();
-    dotenv_path.push(".env");
-    fs::write(dotenv_path, "DOTENV_KEY=dotenv-value").unwrap();
-
-    let mut command = Command::new(&executable_path("just"));
+    let mut command = just();
 
     if self.shell {
-      command.args(&["--shell", "bash"]);
+      command.args(["--shell", "bash"]);
     }
 
     let mut child = command
-      .args(self.args)
+      .args(&self.args)
       .envs(&self.env)
-      .env(
-        "JUST_SUPPRESS_DOTENV_LOAD_WARNING",
-        if self.suppress_dotenv_load_warning {
-          "1"
-        } else {
-          "0"
-        },
-      )
-      .current_dir(self.tempdir.path().join(self.current_dir))
+      .current_dir(self.tempdir.path().join(&self.current_dir))
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
       .spawn()
       .expect("just invocation failed");
+
+    let pid = child.id();
 
     {
       let mut stdin_handle = child.stdin.take().expect("failed to unwrap stdin handle");
@@ -210,79 +262,53 @@ impl Test {
       .wait_with_output()
       .expect("failed to wait for just process");
 
-    fn compare<T: PartialEq + Debug>(name: &str, have: T, want: T) -> bool {
-      let equal = have == want;
-      if !equal {
-        eprintln!("Bad {}: {}", name, Comparison::new(&have, &want));
-      }
-      equal
-    }
-
+    let output_stdout = str::from_utf8(&output.stdout).unwrap();
     let output_stderr = str::from_utf8(&output.stderr).unwrap();
 
-    if let Some(ref stderr_regex) = self.stderr_regex {
-      if !stderr_regex.is_match(output_stderr) {
-        panic!(
-          "Stderr regex mismatch: {} !~= /{}/",
-          output_stderr, stderr_regex
-        );
-      }
+    if let Some(stdout_regex) = &self.stdout_regex {
+      assert!(
+        stdout_regex.is_match(output_stdout),
+        "Stdout regex mismatch:\n{output_stdout:?}\n!~=\n/{stdout_regex:?}/",
+      );
     }
 
-    if !compare("status", output.status.code().unwrap(), self.status)
-      | !compare("stdout", str::from_utf8(&output.stdout).unwrap(), &stdout)
-      | (self.stderr_regex.is_none() && !compare("stderr", output_stderr, &stderr))
+    if let Some(stderr_regex) = &self.stderr_regex {
+      assert!(
+        stderr_regex.is_match(output_stderr),
+        "Stderr regex mismatch:\n{output_stderr:?}\n!~=\n/{stderr_regex:?}/",
+      );
+    }
+
+    if !compare("status", output.status.code(), Some(status))
+      | (self.stdout_regex.is_none() && !compare_string("stdout", output_stdout, &stdout))
+      | (self.stderr_regex.is_none() && !compare_string("stderr", output_stderr, &stderr))
     {
       panic!("Output mismatch.");
     }
 
-    if self.status == EXIT_SUCCESS {
-      test_round_trip(self.tempdir.path());
+    if let Some(response) = &self.response {
+      assert_eq!(
+        &serde_json::from_str::<Response>(output_stdout)
+          .expect("failed to deserialize stdout as response"),
+        response,
+        "response mismatch"
+      );
     }
 
-    self.tempdir
+    for (path, expected) in &self.expected_files {
+      let actual = fs::read(self.tempdir.path().join(path)).unwrap();
+      assert_eq!(
+        actual,
+        expected.as_slice(),
+        "mismatch for expected file at path {}",
+        path.display(),
+      );
+    }
+
+    Output {
+      pid,
+      stdout: output_stdout.into(),
+      tempdir: self.tempdir,
+    }
   }
-}
-
-#[derive(PartialEq, Debug)]
-struct Output<'a> {
-  stdout: &'a str,
-  stderr: &'a str,
-  status: i32,
-}
-
-fn test_round_trip(tmpdir: &Path) {
-  println!("Reparsing...");
-
-  let output = Command::new(&executable_path("just"))
-    .current_dir(tmpdir)
-    .arg("--dump")
-    .output()
-    .expect("just invocation failed");
-
-  if !output.status.success() {
-    panic!("dump failed: {}", output.status);
-  }
-
-  let dumped = String::from_utf8(output.stdout).unwrap();
-
-  let reparsed_path = tmpdir.join("reparsed.just");
-
-  fs::write(&reparsed_path, &dumped).unwrap();
-
-  let output = Command::new(&executable_path("just"))
-    .current_dir(tmpdir)
-    .arg("--justfile")
-    .arg(&reparsed_path)
-    .arg("--dump")
-    .output()
-    .expect("just invocation failed");
-
-  if !output.status.success() {
-    panic!("reparse failed: {}", output.status);
-  }
-
-  let reparsed = String::from_utf8(output.stdout).unwrap();
-
-  assert_eq!(reparsed, dumped, "reparse mismatch");
 }

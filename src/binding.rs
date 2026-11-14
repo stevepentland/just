@@ -1,13 +1,20 @@
-use crate::common::*;
+use super::*;
 
 /// A binding of `name` to `value`
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub(crate) struct Binding<'src, V = String> {
-  /// Export binding as an environment variable to child processes
+pub(crate) struct Binding<'src, V = Value> {
+  #[serde(skip)]
+  pub(crate) attributes: AttributeSet<'src>,
+  pub(crate) eager: bool,
   pub(crate) export: bool,
-  /// Binding name
+  #[serde(skip)]
+  pub(crate) file_depth: u32,
   pub(crate) name: Name<'src>,
-  /// Binding value
+  #[serde(skip)]
+  pub(crate) number: Number,
+  #[serde(skip)]
+  pub(crate) prelude: bool,
+  pub(crate) private: bool,
   pub(crate) value: V,
 }
 

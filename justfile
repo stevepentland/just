@@ -1,88 +1,102 @@
-#!/usr/bin/env just --justfile
+#!/usr/bin/env -S just --justfile
 # ^ A shebang isn't required, but allows a justfile to be executed
 #   like a script, with `./justfile test`, for example.
 
 alias t := test
 
-alias c := check
+[group: 'dev']
+watch +args='lcheck':
+  cargo watch --clear --exec '{{ args }}'
 
-bt := '0'
+[group: 'test']
+test: (watch 'ltest --tests --all --all-targets')
 
-export RUST_BACKTRACE := bt
+[group: 'check']
+check: (watch 'lcheck --tests --all --all-targets')
 
-log := "warn"
+[group: 'check']
+ci: test build-book forbid
+  cargo lclippy --all --all-targets --all-features -- --deny warnings
+  cargo fmt --all -- --check
+  cargo update --locked --package just
 
-export JUST_LOG := log
-
-test:
-  cargo ltest
-
-fuzz:
-  cargo +nightly fuzz run fuzz-compiler
-
+[group: 'misc']
 run:
-  cargo run
+  cargo lrun
 
-# only run tests matching PATTERN
-filter PATTERN:
-  cargo ltest {{PATTERN}}
+# only run tests matching `PATTERN`
+[group: 'test']
+filter PATTERN: (watch f'ltest --tests --all --all-targets {{ PATTERN }}')
 
+[group: 'misc']
 build:
   cargo lbuild
 
+[group: 'misc']
 fmt:
   cargo fmt --all
 
-watch +COMMAND='ltest':
-  cargo watch --clear --exec "{{COMMAND}}"
+[group: 'check']
+shellcheck:
+  shellcheck www/install.sh
 
+[group: 'doc']
 man:
-  cargo build --features help4help2man
-  help2man \
-    --name 'save and run commands' \
-    --manual 'Just Manual' \
-    --no-info \
-    target/debug/just \
-    > man/just.1
+  mkdir -p man
+  cargo lrun -- --man > man/just.1
 
+[group: 'doc']
 view-man: man
   man man/just.1
 
-version := `sed -En 's/version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -1`
+[group: 'doc']
+doc:
+  cargo doc --all --open
 
 # add git log messages to changelog
-changes:
-  git log --pretty=format:%s >> CHANGELOG.md
+[group: 'release']
+update-changelog:
+  echo >> CHANGELOG.md
+  git log --pretty='format:- %s' >> CHANGELOG.md
 
-check: actionlint fmt clippy test forbid
-  git diff --no-ext-diff --quiet --exit-code
-  grep '^\[{{ version }}\]' CHANGELOG.md
-  cargo +nightly generate-lockfile -Z minimal-versions
-  cargo ltest
-  git checkout Cargo.lock
+[group: 'release']
+update-contributors:
+  changeling update-contributors
+
+[group: 'check']
+action-versions:
+  cargo lrun --package action-versions
+
+[group: 'check']
+outdated:
+  cargo outdated -R
+
+[group: 'check']
+unused:
+  cargo +nightly udeps --workspace
 
 # publish current GitHub master branch
+[group: 'release']
 publish:
   #!/usr/bin/env bash
   set -euxo pipefail
   rm -rf tmp/release
-  git clone git@github.com:casey/just.git tmp/release
-  VERSION=`sed -En 's/version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -1`
+  git clone --depth 1 git@github.com:casey/just.git tmp/release
   cd tmp/release
+  ! grep '<sup>master</sup>' README.md
+  VERSION=`sed -En 's/version[[:space:]]*=[[:space:]]*"([^"]+)"/\1/p' Cargo.toml | head -1`
   git tag -a $VERSION -m "Release $VERSION"
-  git push github $VERSION
+  git push origin $VERSION
   cargo publish
   cd ../..
   rm -rf tmp/release
 
-push: check
-  ! git branch | grep '* master'
-  git push github
-
-pr: push
-  gh pr create --web
+[group: 'release']
+readme-version-notes:
+  grep '<sup>master</sup>' README.md
 
 # clean up feature branch BRANCH
+[group: 'dev']
 done BRANCH=`git rev-parse --abbrev-ref HEAD`:
   git checkout master
   git diff --no-ext-diff --quiet --exit-code
@@ -91,44 +105,38 @@ done BRANCH=`git rev-parse --abbrev-ref HEAD`:
   git branch -D {{BRANCH}}
 
 # install just from crates.io
+[group: 'misc']
 install:
   cargo install -f just
 
 # install development dependencies
+[group: 'dev']
 install-dev-deps:
   rustup install nightly
   rustup update nightly
-  cargo +nightly install cargo-fuzz
-  cargo install cargo-check
   cargo install cargo-limit
   cargo install cargo-watch
-
-# install system development dependencies with homebrew
-install-dev-deps-homebrew:
-  brew tap "rhysd/actionlint" "https://github.com/rhysd/actionlint"
-  brew install actionlint help2man shellcheck
-
-actionlint:
-  SHELLCHECK_OPTS='-e SC2006 -e SC2002 -e SC2050' actionlint
+  cargo install --locked mdbook@0.4.52
+  cargo install --locked mdbook-linkcheck@0.7.7
 
 # everyone's favorite animate paper clip
-clippy:
-  cargo lclippy --all --all-targets --all-features
+[group: 'check']
+clippy: (watch 'lclippy --all --all-targets --all-features -- --deny warnings')
 
+[group: 'check']
 forbid:
   ./bin/forbid
 
-# count non-empty lines of code
-sloc:
-  @cat src/*.rs | sed '/^\s*$/d' | wc -l
-
+[group: 'dev']
 replace FROM TO:
   sd '{{FROM}}' '{{TO}}' src/*.rs
 
+[group: 'demo']
 test-quine:
-  cargo run -- quine
+  cargo lrun -- quine
 
 # make a quine, compile it, and verify it
+[group: 'demo']
 quine:
   mkdir -p tmp
   @echo '{{quine-text}}' > tmp/gen0.c
@@ -156,22 +164,19 @@ quine-text := '
   }
 '
 
-render-readme:
-  #!/usr/bin/env ruby
-  require 'github/markup'
-  $rendered = GitHub::Markup.render("README.adoc", File.read("README.adoc"))
-  File.write('tmp/README.html', $rendered)
+[group: 'check']
+build-book:
+  cargo lrun --package generate-book
+  mdbook build book/en
+  mdbook build book/zh
 
-watch-readme:
-  just render-readme
-  fswatch -ro README.adoc | xargs -n1 -I{} just render-readme
-
-generate-completions:
-  ./bin/generate-completions
+[group: 'dev']
+print-readme-constants-table:
+  cargo ltest constants::tests::readme_table -- --nocapture
 
 # run all polyglot recipes
+[group: 'demo']
 polyglot: _python _js _perl _sh _ruby
-# (recipes that start with `_` are hidden from --list)
 
 _python:
   #!/usr/bin/env python3
@@ -190,15 +195,42 @@ _sh:
   hello='Yo'
   echo "$hello from a shell script!"
 
+_nu:
+  #!/usr/bin/env nu
+  let hellos = ["Greetings", "Yo", "Howdy"]
+  $hellos | each {|el| print $"($el) from a nushell script!" }
+
 _ruby:
   #!/usr/bin/env ruby
   puts "Hello from ruby!"
 
 # Print working directory, for demonstration purposes!
+[group: 'demo']
 pwd:
   echo {{invocation_directory()}}
 
-# Local Variables:
-# mode: makefile
-# End:
-# vim: set ft=make :
+[group: 'test']
+test-release-workflow:
+  -git tag -d test-release
+  -git push origin :test-release
+  git tag test-release
+  git push origin test-release
+
+[group: 'test']
+test-completions:
+  #!/usr/bin/env bash
+  rm -rf tmp/complete
+  mkdir -p tmp/complete/bin
+  cargo lbuild
+  cp target/debug/just tmp/complete/bin
+  ./tmp/complete/bin/just --completions bash > tmp/complete/just.bash
+  cat > tmp/complete/justfile << EOF
+  alias hello := foo::bar
+  mod foo
+  EOF
+  echo 'bar:' > tmp/complete/foo.just
+  cd tmp/complete && PATH="`realpath bin`:$PATH" bash --init-file just.bash
+
+[group: 'demo']
+rule124:
+  just -f examples/rule124.just

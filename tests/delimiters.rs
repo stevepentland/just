@@ -1,104 +1,137 @@
-use crate::common::*;
+use super::*;
 
-test! {
-  name: mismatched_delimiter,
-  justfile: "(]",
-  stderr: "
-    error: Mismatched closing delimiter `]`. (Did you mean to close the `(` on line 1?)
-      |
-    1 | (]
-      |  ^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn mismatched_delimiter() {
+  Test::new()
+    .justfile("(]")
+    .stderr(
+      "
+        error: mismatched closing delimiter `]`, did you mean to close the `(` on line 1?
+         ——▶ justfile:1:2
+          │
+        1 │ (]
+          │  ^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: unexpected_delimiter,
-  justfile: "]",
-  stderr: "
-    error: Unexpected closing delimiter `]`
-      |
-    1 | ]
-      | ^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn unexpected_delimiter() {
+  Test::new()
+    .justfile("]")
+    .stderr(
+      "
+        error: unexpected closing delimiter `]`
+         ——▶ justfile:1:1
+          │
+        1 │ ]
+          │ ^
+      ",
+    )
+    .failure();
 }
 
-test! {
-  name: paren_continuation,
-  justfile: "
-    x := (
+#[test]
+fn paren_continuation() {
+  Test::new()
+    .justfile(
+      "
+        x := (
+              'a'
+                  +
+          'b'
+        )
+
+        foo:
+          echo {{x}}
+      ",
+    )
+    .stdout("ab\n")
+    .stderr("echo ab\n")
+    .success();
+}
+
+#[test]
+fn brace_continuation() {
+  Test::new()
+    .justfile(
+      "
+        x := if '' == '' {
           'a'
-              +
-      'b'
+        } else {
+          'b'
+        }
+
+        foo:
+          echo {{x}}
+      ",
     )
-
-    foo:
-      echo {{x}}
-  ",
-  stdout: "ab\n",
-  stderr: "echo ab\n",
+    .stdout("a\n")
+    .stderr("echo a\n")
+    .success();
 }
 
-test! {
-  name: brace_continuation,
-  justfile: "
-    x := if '' == '' {
-      'a'
-    } else {
-      'b'
-    }
+#[test]
+fn bracket_continuation() {
+  Test::new()
+    .justfile(
+      "
+        set shell := [
+          'sh',
+          '-cu',
+        ]
 
-    foo:
-      echo {{x}}
-  ",
-  stdout: "a\n",
-  stderr: "echo a\n",
-}
-
-test! {
-  name: bracket_continuation,
-  justfile: "
-    set shell := [
-      'sh',
-      '-cu',
-    ]
-
-    foo:
-      echo foo
-  ",
-  stdout: "foo\n",
-  stderr: "echo foo\n",
-}
-
-test! {
-  name: dependency_continuation,
-  justfile: "
-    foo: (
-    bar 'bar'
+        foo:
+          echo foo
+      ",
     )
-      echo foo
-
-    bar x:
-      echo {{x}}
-  ",
-  stdout: "bar\nfoo\n",
-  stderr: "echo bar\necho foo\n",
+    .stdout("foo\n")
+    .stderr("echo foo\n")
+    .success();
 }
 
-test! {
-  name: no_interpolation_continuation,
-  justfile: "
-    foo:
-      echo {{ (
-        'a' + 'b')}}
-  ",
-  stdout: "",
-  stderr: "
-    error: Unterminated interpolation
-      |
-    2 |   echo {{ (
-      |        ^^
-  ",
-  status: EXIT_FAILURE,
+#[test]
+fn dependency_continuation() {
+  Test::new()
+    .justfile(
+      "
+        foo: (
+        bar 'bar'
+        )
+          echo foo
+
+        bar x:
+          echo {{x}}
+      ",
+    )
+    .stdout("bar\nfoo\n")
+    .stderr("echo bar\necho foo\n")
+    .success();
+}
+
+#[test]
+fn interpolation_continuation() {
+  Test::new()
+    .justfile(
+      "
+        foo:
+          echo {{ (
+            'a' + 'b')}}
+      ",
+    )
+    .stderr("echo ab\n")
+    .stdout("ab\n")
+    .success();
+}
+
+#[test]
+fn comments_in_delimiters_are_ignored() {
+  assert_eval(
+    "(
+      # foo
+      'bar'
+    )",
+    "bar",
+  );
 }

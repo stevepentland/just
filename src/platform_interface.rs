@@ -1,21 +1,24 @@
-use crate::common::*;
+use super::*;
 
 pub(crate) trait PlatformInterface {
-  /// Construct a command equivalent to running the script at `path` with the
-  /// shebang line `shebang`
+  /// translate path from "native" path to path interpreter expects
+  fn convert_native_path(config: &Config, working_directory: &Utf8Path, path: &Utf8Path) -> String;
+
+  /// install handler, may only be called once
+  fn install_signal_handler<T: Fn(Signal) + Send + 'static>(handler: T) -> RunResult<'static>;
+
+  /// construct command equivalent to running script at `path` with shebang
+  /// line `shebang`
   fn make_shebang_command(
-    path: &Path,
-    working_directory: &Path,
+    config: &Config,
+    path: &Utf8Path,
     shebang: Shebang,
+    working_directory: Option<&Utf8Path>,
   ) -> Result<Command, OutputError>;
 
-  /// Set the execute permission on the file pointed to by `path`
-  fn set_execute_permission(path: &Path) -> Result<(), io::Error>;
+  /// set the execute permission on file pointed to by `path`
+  fn set_execute_permission(path: &Utf8Path) -> io::Result<()>;
 
-  /// Extract the signal from a process exit status, if it was terminated by a
-  /// signal
-  fn signal_from_exit_status(exit_status: process::ExitStatus) -> Option<i32>;
-
-  /// Translate a path from a "native" path to a path the interpreter expects
-  fn convert_native_path(working_directory: &Path, path: &Path) -> Result<String, String>;
+  /// extract signal from process exit status
+  fn signal_from_exit_status(exit_status: ExitStatus) -> Option<i32>;
 }

@@ -1,28 +1,13 @@
 #[must_use]
 pub fn unindent(text: &str) -> String {
-  // find line start and end indices
-  let mut lines = Vec::new();
-  let mut start = 0;
-  for (i, c) in text.char_indices() {
-    if c == '\n' || i == text.len() - c.len_utf8() {
-      let end = i + 1;
-      lines.push(&text[start..end]);
-      start = end;
-    }
-  }
+  let lines = text.split_inclusive('\n').collect::<Vec<&str>>();
 
   let common_indentation = lines
     .iter()
     .filter(|line| !blank(line))
-    .cloned()
+    .copied()
     .map(indentation)
-    .fold(
-      None,
-      |common_indentation, line_indentation| match common_indentation {
-        Some(common_indentation) => Some(common(common_indentation, line_indentation)),
-        None => Some(line_indentation),
-      },
-    )
+    .reduce(common)
     .unwrap_or("");
 
   let mut replacements = Vec::with_capacity(lines.len());
@@ -33,7 +18,13 @@ pub fn unindent(text: &str) -> String {
     let last = i == lines.len() - 1;
 
     let replacement = match (blank, first, last) {
-      (true, false, false) => "\n",
+      (true, false, false) => {
+        if line.ends_with("\r\n") {
+          "\r\n"
+        } else {
+          "\n"
+        }
+      }
       (true, _, _) => "",
       (false, _, _) => &line[common_indentation.len()..],
     };
@@ -82,6 +73,7 @@ mod tests {
     assert_eq!(unindent(""), "");
     assert_eq!(unindent("  foo\n  bar"), "foo\nbar");
     assert_eq!(unindent("  foo\n  bar\n\n"), "foo\nbar\n");
+    assert_eq!(unindent("  foo\r\n\r\n  bar\r\n"), "foo\r\n\r\nbar\r\n");
 
     assert_eq!(
       unindent(

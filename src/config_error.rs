@@ -1,24 +1,30 @@
-use crate::common::*;
+use super::*;
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub(crate)))]
+#[snafu(visibility(pub(crate)), context(suffix(false)))]
 pub(crate) enum ConfigError {
-  #[snafu(display("Failed to get current directory: {}", source))]
-  CurrentDir { source: io::Error },
   #[snafu(display(
-    "Internal config error, this may indicate a bug in just: {} \
+    "internal config error, this may indicate a bug in just: {message} \
      consider filing an issue: https://github.com/casey/just/issues/new",
-    message
   ))]
   Internal { message: String },
+  #[snafu(display("invalid module path `{}`", path.join(" ")))]
+  ModulePath { path: Vec<String> },
+  #[snafu(display("invalid override path `{path}`"))]
+  OverridePath { path: String },
+  #[snafu(transparent)]
+  Path { source: PathError },
+  #[snafu(display("failed to parse request: {source}"))]
+  RequestParse { source: serde_json::Error },
   #[snafu(display(
-    "Path-prefixed recipes may not be used with `--working-directory` or `--justfile`."
+    "path-prefixed recipes may not be used with `--global-justfile`, `--working-directory`, or \
+    `--justfile`"
   ))]
   SearchDirConflict,
   #[snafu(display(
     "`--{}` used with unexpected {}: {}",
     subcommand.to_lowercase(),
-    Count("argument", arguments.len()),
+    Count::unnumbered("argument", arguments.len()),
     List::and_ticked(arguments)
   ))]
   SubcommandArguments {
@@ -28,21 +34,21 @@ pub(crate) enum ConfigError {
   #[snafu(display(
       "`--{}` used with unexpected overrides: {}",
       subcommand.to_lowercase(),
-      List::and_ticked(overrides.iter().map(|(key, value)| format!("{}={}", key, value))),
+      List::and_ticked(overrides.iter()),
   ))]
   SubcommandOverrides {
     subcommand: &'static str,
-    overrides: BTreeMap<String, String>,
+    overrides: Vec<String>,
   },
   #[snafu(display(
       "`--{}` used with unexpected overrides: {}; and arguments: {}",
       subcommand.to_lowercase(),
-      List::and_ticked(overrides.iter().map(|(key, value)| format!("{}={}", key, value))),
+      List::and_ticked(overrides.iter()),
       List::and_ticked(arguments)))
   ]
   SubcommandOverridesAndArguments {
     subcommand: &'static str,
-    overrides: BTreeMap<String, String>,
+    overrides: Vec<String>,
     arguments: Vec<String>,
   },
 }

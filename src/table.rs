@@ -1,6 +1,4 @@
-use crate::common::*;
-
-use std::collections::btree_map;
+use {super::*, std::collections::btree_map};
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -9,8 +7,8 @@ pub(crate) struct Table<'key, V: Keyed<'key>> {
 }
 
 impl<'key, V: Keyed<'key>> Table<'key, V> {
-  pub(crate) fn new() -> Table<'key, V> {
-    Table {
+  pub(crate) fn new() -> Self {
+    Self {
       map: BTreeMap::new(),
     }
   }
@@ -27,8 +25,24 @@ impl<'key, V: Keyed<'key>> Table<'key, V> {
     self.map.get(key)
   }
 
+  pub(crate) fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+    self.map.get_mut(key)
+  }
+
+  pub(crate) fn into_values(self) -> btree_map::IntoValues<&'key str, V> {
+    self.map.into_values()
+  }
+
+  pub(crate) fn is_empty(&self) -> bool {
+    self.map.is_empty()
+  }
+
   pub(crate) fn values(&self) -> btree_map::Values<&'key str, V> {
     self.map.values()
+  }
+
+  pub(crate) fn values_mut(&mut self) -> btree_map::ValuesMut<&'key str, V> {
+    self.map.values_mut()
   }
 
   pub(crate) fn contains_key(&self, key: &str) -> bool {
@@ -44,8 +58,7 @@ impl<'key, V: Keyed<'key>> Table<'key, V> {
   }
 
   pub(crate) fn pop(&mut self) -> Option<V> {
-    let key = self.map.keys().next().copied()?;
-    self.map.remove(key)
+    self.map.pop_first().map(|(_key, value)| value)
   }
 
   pub(crate) fn remove(&mut self, key: &str) -> Option<V> {
@@ -61,7 +74,7 @@ impl<'key, V: Keyed<'key>> Default for Table<'key, V> {
 
 impl<'key, V: Keyed<'key>> FromIterator<V> for Table<'key, V> {
   fn from_iter<I: IntoIterator<Item = V>>(iter: I) -> Self {
-    Table {
+    Self {
       map: iter.into_iter().map(|value| (value.key(), value)).collect(),
     }
   }
@@ -89,7 +102,6 @@ impl<'table, V: Keyed<'table> + 'table> IntoIterator for &'table Table<'table, V
   type IntoIter = btree_map::Iter<'table, &'table str, V>;
   type Item = (&'table &'table str, &'table V);
 
-  #[must_use]
   fn into_iter(self) -> btree_map::Iter<'table, &'table str, V> {
     self.map.iter()
   }

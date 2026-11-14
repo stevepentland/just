@@ -1,7 +1,7 @@
-use crate::common::*;
+use super::*;
 
 pub(crate) trait ColorDisplay {
-  fn color_display<'a>(&'a self, color: Color) -> Wrapper<'a>
+  fn color_display(&self, color: Color) -> Wrapper
   where
     Self: Sized,
   {
@@ -13,7 +13,7 @@ pub(crate) trait ColorDisplay {
 
 pub(crate) struct Wrapper<'a>(&'a dyn ColorDisplay, Color);
 
-impl<'a> Display for Wrapper<'a> {
+impl Display for Wrapper<'_> {
   fn fmt(&self, f: &mut Formatter) -> fmt::Result {
     self.0.fmt(f, self.1)
   }

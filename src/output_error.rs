@@ -1,9 +1,11 @@
-use crate::common::*;
+use super::*;
 
 #[derive(Debug)]
 pub(crate) enum OutputError {
   /// Non-zero exit code
   Code(i32),
+  /// Interrupted by signal
+  Interrupted(Signal),
   /// IO error
   Io(io::Error),
   /// Terminated by signal
@@ -11,17 +13,34 @@ pub(crate) enum OutputError {
   /// Unknown failure
   Unknown,
   /// Stdout not UTF-8
-  Utf8(std::str::Utf8Error),
+  Utf8(str::Utf8Error),
+}
+
+impl OutputError {
+  pub(crate) fn result_from_exit_status(exit_status: ExitStatus) -> Result<(), Self> {
+    match exit_status.code() {
+      Some(0) => Ok(()),
+      Some(code) => Err(Self::Code(code)),
+      None => match Platform::signal_from_exit_status(exit_status) {
+        Some(signal) => Err(Self::Signal(signal)),
+        None => Err(Self::Unknown),
+      },
+    }
+  }
 }
 
 impl Display for OutputError {
-  fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-    match *self {
-      Self::Code(code) => write!(f, "Process exited with status code {}", code),
-      Self::Io(ref io_error) => write!(f, "Error executing process: {}", io_error),
-      Self::Signal(signal) => write!(f, "Process terminated by signal {}", signal),
-      Self::Unknown => write!(f, "Process experienced an unknown failure"),
-      Self::Utf8(ref err) => write!(f, "Could not convert process stdout to UTF-8: {}", err),
+  fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+    match self {
+      Self::Code(code) => write!(f, "process exited with status code {code}"),
+      Self::Interrupted(signal) => write!(
+        f,
+        "process succeeded but `just` was interrupted by signal {signal}"
+      ),
+      Self::Io(io_error) => write!(f, "could not execute process: {io_error}"),
+      Self::Signal(signal) => write!(f, "process terminated by signal {signal}"),
+      Self::Unknown => write!(f, "process experienced an unknown failure"),
+      Self::Utf8(err) => write!(f, "could not convert process stdout to UTF-8: {err}"),
     }
   }
 }

@@ -1,13 +1,13 @@
-use crate::common::*;
+use super::*;
 
 /// Parameters can either be…
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ParameterKind {
-  /// …singular, accepting a single argument
-  Singular,
   /// …variadic, accepting one or more arguments
   Plus,
+  /// …singular, accepting a single argument
+  Singular,
   /// …variadic, accepting zero or more arguments
   Star,
 }

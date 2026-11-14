@@ -1,17 +1,17 @@
-use crate::common::*;
+use super::*;
 
 #[test]
 fn export_recipe() {
   Test::new()
     .justfile(
       "
-      export foo='bar':
-        echo {{foo}}
-    ",
+        export foo='bar':
+          echo {{foo}}
+      ",
     )
     .stdout("bar\n")
     .stderr("echo bar\n")
-    .run();
+    .success();
 }
 
 #[test]
@@ -19,11 +19,11 @@ fn alias_recipe() {
   Test::new()
     .justfile(
       "
-      alias foo='bar':
-        echo {{foo}}
-    ",
+        alias foo='bar':
+          echo {{foo}}
+      ",
     )
     .stdout("bar\n")
     .stderr("echo bar\n")
-    .run();
+    .success();
 }

@@ -1,128 +1,315 @@
-use crate::common::*;
+use {super::*, clap_mangen::Man};
 
-const INIT_JUSTFILE: &str = "default:\n\techo 'Hello, world!'\n";
+pub const INIT_JUSTFILE: &str = "\
+# https://just.systems
 
-#[derive(PartialEq, Clone, Debug)]
+default:
+    echo 'Hello, world!'
+";
+
+static BACKTICK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("(`.*?`)|(`[^`]*$)").unwrap());
+
+const CHOOSER_CANCELLED_EXIT_STATUS: i32 = 130;
+
+#[derive(PartialEq, Clone, Debug, IntoStaticStr)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum Subcommand {
   Changelog,
   Choose {
-    overrides: BTreeMap<String, String>,
-    chooser: Option<String>,
+    chooser: Option<Utf8PathBuf>,
+  },
+  Clean {
+    path: Option<Modulepath>,
   },
   Command {
-    arguments: Vec<OsString>,
-    binary: OsString,
-    overrides: BTreeMap<String, String>,
+    arguments: Vec<String>,
+    binary: String,
   },
   Completions {
-    shell: String,
+    shell: Shell,
   },
-  Dump,
+  Dump {
+    format: DumpFormat,
+  },
   Edit,
   Evaluate {
-    overrides: BTreeMap<String, String>,
-    variable: Option<String>,
+    format: EvaluateFormat,
+    path: Modulepath,
   },
   Format,
+  Groups,
   Init,
-  List,
+  List {
+    path: Modulepath,
+  },
+  Man,
+  Request {
+    request: Request,
+  },
   Run {
-    overrides: BTreeMap<String, String>,
     arguments: Vec<String>,
   },
   Show {
-    name: String,
+    path: Modulepath,
   },
   Summary,
+  Usage {
+    path: Modulepath,
+  },
   Variables,
 }
 
+impl Default for Subcommand {
+  fn default() -> Self {
+    Self::Run {
+      arguments: Vec::new(),
+    }
+  }
+}
+
 impl Subcommand {
-  pub(crate) fn run<'src>(&self, config: &Config, loader: &'src Loader) -> Result<(), Error<'src>> {
+  pub(crate) fn execute<'src>(&self, config: &Config, loader: &'src Loader) -> RunResult<'src> {
     use Subcommand::*;
 
     match self {
-      Changelog => {
-        Self::changelog();
-        return Ok(());
-      }
-      Completions { shell } => return Self::completions(&shell),
+      Changelog => return Self::changelog(),
+      Completions { shell } => return Self::completions(*shell),
       Init => return Self::init(config),
+      Man => return Self::man(),
+      Request { request } => return Self::request(request),
       _ => {}
     }
 
-    let search = Search::find(&config.search_config, &config.invocation_directory)?;
+    let search = Search::search(config)?;
 
-    if let Edit = self {
+    if matches!(self, Edit) {
       return Self::edit(&search);
     }
 
-    let src = loader.load(&search.justfile)?;
+    if matches!(self, Format) {
+      return Self::format(config, loader, &search);
+    }
 
-    let tokens = Lexer::lex(&src)?;
-    let ast = Parser::parse(&tokens)?;
-    let justfile = Analyzer::analyze(ast.clone())?;
+    let compilation = Self::compile(config, loader, &search)?;
+    let justfile = &compilation.justfile;
+
+    match self {
+      Choose { chooser } => Self::choose(
+        chooser.as_deref(),
+        config,
+        justfile,
+        &compilation.overrides,
+        &search,
+      ),
+      Command { .. } | Evaluate { .. } => {
+        justfile.run(config, &search, &[], &compilation.overrides)
+      }
+      Clean { path } => Self::clean(config, &search, path.as_ref()),
+      Dump { format } => Self::dump(config, compilation, *format),
+      Groups => Self::groups(config, justfile),
+      List { path } => Self::list(config, justfile, path),
+      Run { arguments } => Self::run(config, loader, search, compilation, arguments),
+      Show { path } => Self::show(config, justfile, path),
+      Summary => Self::summary(config, justfile),
+      Usage { path } => Self::usage(config, justfile, path),
+      Variables => Self::variables(justfile),
+      Changelog | Completions { .. } | Edit | Format | Init | Man | Request { .. } => {
+        unreachable!()
+      }
+    }
+  }
+
+  fn groups(config: &Config, justfile: &Justfile) -> RunResult<'static> {
+    println!("Recipe groups:");
+    for group in justfile.public_groups(config) {
+      println!("{}{group}", config.list_prefix);
+    }
+    Ok(())
+  }
+
+  pub(crate) fn name(&self) -> &'static str {
+    self.into()
+  }
+
+  fn help_module(justfile: &Justfile, arguments: &[String]) -> Option<Modulepath> {
+    let (last, path) = arguments.split_last()?;
+
+    if last != "--help" && last != "-h" {
+      return None;
+    }
+
+    let path = Modulepath::try_from(
+      path
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<&str>>()
+        .as_slice(),
+    )
+    .ok()?;
+
+    justfile.submodule(&path)?;
+
+    Some(path)
+  }
+
+  fn default_list_module(
+    config: &Config,
+    justfile: &Justfile,
+    arguments: &[String],
+  ) -> Option<Modulepath> {
+    let path = if arguments.is_empty() {
+      Modulepath::default()
+    } else if arguments[0].contains(':') {
+      if arguments.len() != 1 {
+        return None;
+      }
+
+      Modulepath::from_argument(&arguments[0]).ok()?
+    } else {
+      Modulepath::try_from(
+        arguments
+          .iter()
+          .map(String::as_str)
+          .collect::<Vec<&str>>()
+          .as_slice(),
+      )
+      .ok()?
+    };
+
+    let submodule = justfile.submodule(&path)?;
+
+    (config.default_list || submodule.settings.default_list).then_some(path)
+  }
+
+  fn run<'src>(
+    config: &Config,
+    loader: &'src Loader,
+    mut search: Search,
+    mut compilation: Compilation<'src>,
+    arguments: &[String],
+  ) -> RunResult<'src> {
+    let starting_parent = search.justfile.parent().as_ref().unwrap().clean();
+
+    loop {
+      let justfile = &compilation.justfile;
+      let fallback = justfile.settings.fallback
+        && matches!(
+          config.search_config,
+          SearchConfig::FromInvocationDirectory | SearchConfig::FromSearchDirectory { .. }
+        );
+
+      if let Some(path) = Self::help_module(justfile, arguments) {
+        return Self::usage(config, justfile, &path);
+      }
+
+      if let Some(path) = Self::default_list_module(config, justfile, arguments) {
+        return Self::list(config, justfile, &path);
+      }
+
+      let result = justfile.run(config, &search, arguments, &compilation.overrides);
+
+      if fallback
+        && let Err(err @ (Error::UnknownRecipe { .. } | Error::UnknownSubmodule { .. })) = result
+      {
+        search = match search.search_parent_directory(config) {
+          Ok(search) => search,
+          Err(SearchError::NotFound) => return Err(err),
+          Err(search_error) => return Err(search_error.into()),
+        };
+
+        if config.verbosity.loquacious() {
+          let path = if search.global_fallback_used {
+            search.justfile.clone()
+          } else {
+            starting_parent
+              .strip_prefix(search.justfile_parent())
+              .unwrap()
+              .components()
+              .map(|_| Utf8Component::ParentDir)
+              .collect::<Utf8PathBuf>()
+              .join(search.justfile.file_name().unwrap())
+          };
+          eprintln!("Trying {path}");
+        }
+
+        compilation = Self::compile(config, loader, &search)?;
+
+        continue;
+      }
+
+      if config.allow_missing
+        && matches!(
+          result,
+          Err(
+            Error::ModuleAbsent { .. }
+              | Error::UnknownRecipe { .. }
+              | Error::UnknownSubmodule { .. }
+          )
+        )
+      {
+        return Ok(());
+      }
+
+      return result;
+    }
+  }
+
+  fn compile<'src>(
+    config: &Config,
+    loader: &'src Loader,
+    search: &Search,
+  ) -> RunResult<'src, Compilation<'src>> {
+    let compilation = Compiler::compile(config, loader, &search.justfile)?;
+
+    compilation.justfile.check_unstable(config)?;
 
     if config.verbosity.loud() {
-      for warning in &justfile.warnings {
+      for warning in &compilation.justfile.warnings {
         eprintln!("{}", warning.color_display(config.color.stderr()));
       }
     }
 
-    match self {
-      Choose { overrides, chooser } => {
-        Self::choose(config, justfile, &search, overrides, chooser.as_deref())?;
-      }
-      Command { overrides, .. } | Evaluate { overrides, .. } => {
-        justfile.run(config, &search, overrides, &[])?
-      }
-      Dump => Self::dump(config, ast, justfile)?,
-      Format => Self::format(config, &search, &src, ast)?,
-      List => Self::list(config, justfile),
-      Run {
-        arguments,
-        overrides,
-      } => justfile.run(config, &search, overrides, arguments)?,
-      Show { ref name } => Self::show(config, &name, justfile)?,
-      Summary => Self::summary(config, justfile),
-      Variables => Self::variables(justfile),
-      Changelog | Completions { .. } | Edit | Init => unreachable!(),
-    }
+    Ok(compilation)
+  }
 
+  fn changelog() -> RunResult<'static> {
+    print!("{}", include_str!("../CHANGELOG.md"));
     Ok(())
   }
 
-  fn changelog() {
-    print!("{}", include_str!("../CHANGELOG.md"));
-  }
-
   fn choose<'src>(
+    chooser: Option<&Utf8Path>,
     config: &Config,
-    justfile: Justfile<'src>,
+    justfile: &Justfile<'src>,
+    overrides: &HashMap<Number, String>,
     search: &Search,
-    overrides: &BTreeMap<String, String>,
-    chooser: Option<&str>,
-  ) -> Result<(), Error<'src>> {
-    let recipes = justfile
-      .public_recipes(config.unsorted)
-      .iter()
-      .filter(|recipe| recipe.min_arguments() == 0)
-      .cloned()
-      .collect::<Vec<&Recipe<Dependency>>>();
+  ) -> RunResult<'src> {
+    let groups = config.groups.iter().cloned().collect::<BTreeSet<String>>();
+    let mut recipes = Vec::<&Recipe>::new();
+    let mut stack = vec![justfile];
+    while let Some(module) = stack.pop() {
+      recipes.extend(module.public_recipes(config).iter().filter(|recipe| {
+        recipe.min_arguments() == 0
+          && (groups.is_empty() || groups.intersection(&recipe.groups()).next().is_some())
+      }));
+      stack.extend(module.public_modules(config).into_iter().rev());
+    }
 
     if recipes.is_empty() {
       return Err(Error::NoChoosableRecipes);
     }
 
-    let chooser = chooser
-      .map(OsString::from)
-      .or_else(|| env::var_os(config::CHOOSER_ENVIRONMENT_KEY))
-      .unwrap_or_else(|| OsString::from(config::CHOOSER_DEFAULT));
+    let mut command = justfile.settings.shell_command(config);
 
-    let result = justfile
-      .settings
-      .shell_command(&config)
-      .arg(&chooser)
+    let chooser = if let Some(chooser) = chooser {
+      chooser.as_str().into()
+    } else {
+      command.env("JUST_JUSTFILE", &search.justfile);
+      "fzf --multi --preview 'just --unstable --color always --show {}'".into()
+    };
+
+    let result = command
+      .shell_arg(&chooser)
       .current_dir(&search.working_directory)
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
@@ -131,21 +318,20 @@ impl Subcommand {
     let mut child = match result {
       Ok(child) => child,
       Err(io_error) => {
+        let (shell_binary, shell_arguments) = justfile.settings.shell(config);
         return Err(Error::ChooserInvoke {
-          shell_binary: justfile.settings.shell_binary(&config).to_owned(),
-          shell_arguments: justfile.settings.shell_arguments(&config).join(" "),
+          shell_binary: shell_binary.to_owned(),
+          shell_arguments: shell_arguments.join(" "),
           chooser,
           io_error,
         });
       }
     };
 
+    let stdin = child.stdin.as_mut().unwrap();
     for recipe in recipes {
-      if let Err(io_error) = child
-        .stdin
-        .as_mut()
-        .expect("Child was created with piped stdio")
-        .write_all(format!("{}\n", recipe.name).as_bytes())
+      if let Err(io_error) = writeln!(stdin, "{}", recipe.spaced_recipe_path())
+        && io_error.kind() != std::io::ErrorKind::BrokenPipe
       {
         return Err(Error::ChooserWrite { io_error, chooser });
       }
@@ -158,6 +344,10 @@ impl Subcommand {
       }
     };
 
+    if output.status.code() == Some(CHOOSER_CANCELLED_EXIT_STATUS) {
+      return Ok(());
+    }
+
     if !output.status.success() {
       return Err(Error::ChooserStatus {
         status: output.status,
@@ -167,87 +357,121 @@ impl Subcommand {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    let recipes = stdout
-      .trim()
-      .split_whitespace()
-      .map(str::to_owned)
-      .collect::<Vec<String>>();
+    for line in stdout.lines() {
+      let arguments = line
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<String>>();
 
-    justfile.run(config, search, overrides, &recipes)
-  }
-
-  fn completions(shell: &str) -> RunResult<'static, ()> {
-    use clap::Shell;
-
-    fn replace(haystack: &mut String, needle: &str, replacement: &str) -> RunResult<'static, ()> {
-      if let Some(index) = haystack.find(needle) {
-        haystack.replace_range(index..index + needle.len(), replacement);
-        Ok(())
-      } else {
-        Err(Error::internal(format!(
-          "Failed to find text:\n{}\n…in completion script:\n{}",
-          needle, haystack
-        )))
-      }
+      justfile.run(config, search, &arguments, overrides)?;
     }
-
-    let shell = shell
-      .parse::<Shell>()
-      .expect("Invalid value for clap::Shell");
-
-    let buffer = Vec::new();
-    let mut cursor = Cursor::new(buffer);
-    Config::app().gen_completions_to(env!("CARGO_PKG_NAME"), shell, &mut cursor);
-    let buffer = cursor.into_inner();
-    let mut script = String::from_utf8(buffer).expect("Clap completion not UTF-8");
-
-    match shell {
-      Shell::Bash => {
-        for (needle, replacement) in completions::BASH_COMPLETION_REPLACEMENTS {
-          replace(&mut script, needle, replacement)?;
-        }
-      }
-      Shell::Fish => {
-        script.insert_str(0, completions::FISH_RECIPE_COMPLETIONS);
-      }
-      Shell::PowerShell => {
-        for (needle, replacement) in completions::POWERSHELL_COMPLETION_REPLACEMENTS {
-          replace(&mut script, needle, replacement)?;
-        }
-      }
-
-      Shell::Zsh => {
-        for (needle, replacement) in completions::ZSH_COMPLETION_REPLACEMENTS {
-          replace(&mut script, needle, replacement)?;
-        }
-      }
-      Shell::Elvish => {}
-    }
-
-    println!("{}", script.trim());
 
     Ok(())
   }
 
-  fn dump(config: &Config, ast: Ast, justfile: Justfile) -> Result<(), Error<'static>> {
-    match config.dump_format {
+  fn clean(config: &Config, search: &Search, prefix: Option<&Modulepath>) -> RunResult<'static> {
+    let entry_re = Regex::new(r"^[0-9a-f]{64}\.json$").unwrap();
+
+    let path = Cache::dir(search);
+
+    let context = |source| Error::FilesystemIo {
+      source,
+      path: path.clone(),
+    };
+
+    let Some(dir) = filesystem::read_dir_opt(&path)? else {
+      if config.verbosity.loud() {
+        eprintln!("recipe cache not found");
+      }
+      return Ok(());
+    };
+
+    let mut removed = 0;
+
+    for entry in dir {
+      let entry = entry.map_err(context)?;
+
+      let Ok(path) = entry.path().into_utf8() else {
+        continue;
+      };
+
+      if !entry_re.is_match(path.file_name().unwrap()) {
+        continue;
+      }
+
+      if let Some(prefix) = prefix {
+        let file = filesystem::open(&path)?;
+
+        if let Some(entry) = CacheEntry::load(&file, &path)?
+          && !entry.recipe.starts_with(prefix)
+        {
+          continue;
+        }
+      }
+
+      filesystem::remove_file(&path)?;
+
+      removed += 1;
+    }
+
+    if let Err(err) = fs::remove_dir(&path)
+      && err.kind() != io::ErrorKind::DirectoryNotEmpty
+    {
+      return Err(context(err));
+    }
+
+    if config.verbosity.loud() {
+      eprintln!(
+        "removed {}",
+        Count::numbered_irregular("cache entry", "cache entries", removed)
+      );
+    }
+
+    Ok(())
+  }
+
+  fn completions(shell: Shell) -> RunResult<'static> {
+    print!("{}", shell.completion_script());
+    Ok(())
+  }
+
+  fn dump(config: &Config, compilation: Compilation, format: DumpFormat) -> RunResult<'static> {
+    match format {
       DumpFormat::Json => {
-        config.require_unstable("The JSON dump format is currently unstable.")?;
-        serde_json::to_writer(io::stdout(), &justfile)
-          .map_err(|serde_json_error| Error::DumpJson { serde_json_error })?;
-        println!();
+        let json = serde_json::to_string(&compilation.justfile)
+          .map_err(|source| Error::DumpJson { source })?;
+        println!("{json}");
       }
-      DumpFormat::Just => print!("{}", ast),
+      DumpFormat::Just => {
+        print!(
+          "{}",
+          compilation.root_ast().color_display(
+            config
+              .color
+              .with_use_color(UseColor::Never)
+              .with_indentation(
+                config
+                  .indentation
+                  .or(compilation.justfile.settings.indentation)
+                  .unwrap_or_default()
+              )
+          )
+        );
+      }
     }
     Ok(())
   }
 
-  fn edit(search: &Search) -> Result<(), Error<'static>> {
-    let editor = env::var_os("VISUAL")
-      .or_else(|| env::var_os("EDITOR"))
-      .unwrap_or_else(|| "vim".into());
+  fn edit(search: &Search) -> RunResult<'static> {
+    let editor = if let Some(visual) = env_var("VISUAL")? {
+      visual
+    } else if let Some(editor) = env_var("EDITOR")? {
+      editor
+    } else {
+      "vim".into()
+    };
 
-    let error = Command::new(&editor)
+    let error = Command::resolve(&editor)
       .current_dir(&search.working_directory)
       .arg(&search.justfile)
       .status();
@@ -264,13 +488,35 @@ impl Subcommand {
     Ok(())
   }
 
-  fn format(config: &Config, search: &Search, src: &str, ast: Ast) -> Result<(), Error<'static>> {
-    config.require_unstable("The `--fmt` command is currently unstable.")?;
+  fn format<'src>(config: &Config, loader: &'src Loader, search: &Search) -> RunResult<'src> {
+    let (path, src) = loader.load(&search.justfile, &search.justfile)?;
 
-    let formatted = ast.to_string();
+    let ast = Parser::parse_source(
+      &mut Numerator::new(),
+      path,
+      &Source::root(&search.justfile),
+      src,
+    )?;
+
+    if let Some(token) = ast.dropped_comment {
+      return Err(Error::FormatDroppedComment { token });
+    }
+
+    let formatted = ast
+      .color_display(
+        config
+          .color
+          .with_use_color(UseColor::Never)
+          .with_indentation(config.indentation.or(ast.indentation()).unwrap_or_default()),
+      )
+      .to_string();
 
     if config.check {
-      return if formatted != src {
+      if formatted == src {
+        return Ok(());
+      }
+
+      if !config.verbosity.quiet() {
         use similar::{ChangeTag, TextDiff};
 
         let diff = TextDiff::configure()
@@ -280,176 +526,634 @@ impl Subcommand {
         for op in diff.ops() {
           for change in diff.iter_changes(op) {
             let (symbol, color) = match change.tag() {
-              ChangeTag::Delete => ("-", config.color.stderr().diff_deleted()),
-              ChangeTag::Equal => (" ", config.color.stderr()),
-              ChangeTag::Insert => ("+", config.color.stderr().diff_added()),
+              ChangeTag::Delete => ("-", config.color.stdout().diff_deleted()),
+              ChangeTag::Equal => (" ", config.color.stdout()),
+              ChangeTag::Insert => ("+", config.color.stdout().diff_added()),
             };
 
-            eprint!("{}{}{}{}", color.prefix(), symbol, change, color.suffix());
+            print!("{}{symbol}{change}{}", color.prefix(), color.suffix());
           }
         }
+      }
 
-        Err(Error::FormatCheckFoundDiff)
-      } else {
-        Ok(())
-      };
+      Err(Error::FormatCheckFoundDiff)
+    } else if search.tempdir.is_some() {
+      print!("{formatted}");
+      Ok(())
+    } else {
+      if formatted != src {
+        fs::write(&search.justfile, formatted).map_err(|io_error| Error::WriteJustfile {
+          justfile: search.justfile.clone(),
+          io_error,
+        })?;
+
+        if config.verbosity.loud() {
+          eprintln!("wrote justfile to `{}`", search.justfile);
+        }
+      }
+
+      Ok(())
+    }
+  }
+
+  fn init(config: &Config) -> RunResult<'static> {
+    let search = Search::init(config)?;
+
+    if filesystem::is_file(&search.justfile)? {
+      return Err(Error::InitExists {
+        justfile: search.justfile,
+      });
     }
 
-    fs::write(&search.justfile, formatted).map_err(|io_error| Error::WriteJustfile {
-      justfile: search.justfile.clone(),
-      io_error,
-    })?;
+    if let Err(io_error) = fs::write(&search.justfile, INIT_JUSTFILE) {
+      return Err(Error::WriteJustfile {
+        justfile: search.justfile,
+        io_error,
+      });
+    }
 
     if config.verbosity.loud() {
-      eprintln!("Wrote justfile to `{}`", search.justfile.display());
+      eprintln!("wrote justfile to `{}`", search.justfile);
     }
 
     Ok(())
   }
 
-  fn init(config: &Config) -> Result<(), Error<'static>> {
-    let search = Search::init(&config.search_config, &config.invocation_directory)?;
+  fn man() -> RunResult<'static> {
+    let mut buffer = Vec::<u8>::new();
 
-    if search.justfile.is_file() {
-      Err(Error::InitExists {
-        justfile: search.justfile,
-      })
-    } else if let Err(io_error) = fs::write(&search.justfile, INIT_JUSTFILE) {
-      Err(Error::WriteJustfile {
-        justfile: search.justfile,
-        io_error,
-      })
-    } else {
-      if config.verbosity.loud() {
-        eprintln!("Wrote justfile to `{}`", search.justfile.display());
-      }
-      Ok(())
-    }
+    Man::new(Arguments::command().mut_arg("list_heading", |arg| {
+      let default = arg.get_default_values()[0]
+        .to_str()
+        .unwrap()
+        .replace('\n', "\\n");
+      arg.default_value(default)
+    }))
+    .render(&mut buffer)
+    .expect("writing to buffer cannot fail");
+
+    print!("{}", str::from_utf8(&buffer).unwrap());
+
+    Ok(())
   }
 
-  fn list(config: &Config, justfile: Justfile) {
-    // Construct a target to alias map.
-    let mut recipe_aliases: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for alias in justfile.aliases.values() {
-      if alias.is_private() {
-        continue;
+  fn request(request: &Request) -> RunResult<'static> {
+    let response = match request {
+      Request::EnvironmentVariable(key) => Response::EnvironmentVariable(env::var_os(key)),
+      #[cfg(not(windows))]
+      Request::Signal => {
+        let sigset = nix::sys::signal::SigSet::all();
+
+        sigset.thread_block().unwrap();
+
+        let received = sigset.wait().unwrap();
+
+        Response::Signal(received.as_str().into())
+      }
+    };
+
+    serde_json::to_writer(io::stdout(), &response).map_err(|source| Error::DumpJson { source })?;
+
+    Ok(())
+  }
+
+  fn list<'src>(config: &Config, root: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
+    let module = Self::resolve_module(root, path, &path.components)?;
+    Self::list_module(config, 0, &config.groups, module)?;
+    Ok(())
+  }
+
+  fn list_module(
+    config: &Config,
+    depth: usize,
+    groups: &[String],
+    module: &Justfile,
+  ) -> RunResult<'static> {
+    const MAX_WIDTH: usize = 50;
+
+    fn print_doc_and_aliases(
+      config: &Config,
+      name: &str,
+      doc: Option<&str>,
+      aliases: &[&str],
+      max_signature_width: usize,
+      signature_widths: &BTreeMap<&str, usize>,
+    ) -> RunResult<'static> {
+      let color = config.color.stdout();
+
+      let inline_aliases = config.alias_style != AliasStyle::Separate && !aliases.is_empty();
+
+      if inline_aliases || doc.is_some() {
+        print!(
+          "{:padding$}{}",
+          "",
+          color.doc().paint("#"),
+          padding = max_signature_width.saturating_sub(signature_widths[name]) + 1,
+        );
       }
 
-      if !recipe_aliases.contains_key(alias.target.name.lexeme()) {
-        recipe_aliases.insert(alias.target.name.lexeme(), vec![alias.name.lexeme()]);
-      } else {
-        let aliases = recipe_aliases.get_mut(alias.target.name.lexeme()).unwrap();
-        aliases.push(alias.name.lexeme());
+      let print_aliases = || -> RunResult<'static> {
+        print!(
+          " {}",
+          color.alias().paint(&format!(
+            "[alias{}: {}]",
+            if aliases.len() == 1 { "" } else { "es" },
+            aliases.join(", ")
+          ))
+        );
+        Ok(())
+      };
+
+      if inline_aliases && config.alias_style == AliasStyle::Left {
+        print_aliases()?;
       }
-    }
 
-    let mut line_widths: BTreeMap<&str, usize> = BTreeMap::new();
-
-    for (name, recipe) in &justfile.recipes {
-      if recipe.private {
-        continue;
-      }
-
-      for name in iter::once(name).chain(recipe_aliases.get(name).unwrap_or(&Vec::new())) {
-        let mut line_width = UnicodeWidthStr::width(*name);
-
-        for parameter in &recipe.parameters {
-          line_width += UnicodeWidthStr::width(
-            format!(" {}", parameter.color_display(Color::never())).as_str(),
-          );
+      if let Some(doc) = doc {
+        print!(" ");
+        let mut end = 0;
+        for backtick in BACKTICK_RE.find_iter(doc) {
+          let prefix = &doc[end..backtick.start()];
+          if !prefix.is_empty() {
+            print!("{}", color.doc().paint(prefix));
+          }
+          print!("{}", color.doc_backtick().paint(backtick.as_str()));
+          end = backtick.end();
         }
 
-        if line_width <= 30 {
-          line_widths.insert(name, line_width);
+        let suffix = &doc[end..];
+        if !suffix.is_empty() {
+          print!("{}", color.doc().paint(suffix));
         }
       }
+
+      if inline_aliases && config.alias_style == AliasStyle::Right {
+        print_aliases()?;
+      }
+
+      println!();
+
+      Ok(())
     }
 
-    let max_line_width = cmp::min(line_widths.values().cloned().max().unwrap_or(0), 30);
-
-    let doc_color = config.color.stdout().doc();
-    print!("{}", config.list_heading);
-
-    for recipe in justfile.public_recipes(config.unsorted) {
-      let name = recipe.name();
-
-      for (i, name) in iter::once(&name)
-        .chain(recipe_aliases.get(name).unwrap_or(&Vec::new()))
-        .enumerate()
+    let (aliases, cross_module_aliases) = if config.no_aliases {
+      (BTreeMap::new(), Vec::new())
+    } else {
+      let mut aliases = BTreeMap::<&str, Vec<&str>>::new();
+      let mut cross_module_aliases = Vec::new();
+      for alias in module
+        .recipe_aliases
+        .values()
+        .filter(|alias| alias.is_public())
       {
-        print!("{}{}", config.list_prefix, name);
-        for parameter in &recipe.parameters {
-          print!(" {}", parameter.color_display(config.color.stdout()));
+        if alias.target.module_path() == &module.module_path {
+          aliases
+            .entry(alias.target.name.lexeme())
+            .or_default()
+            .push(alias.name.lexeme());
+        } else {
+          cross_module_aliases.push(alias);
+        }
+      }
+      (aliases, cross_module_aliases)
+    };
+
+    let signature_widths = {
+      let mut signature_widths: BTreeMap<&str, usize> = BTreeMap::new();
+
+      for (name, recipe) in &module.recipes {
+        if !recipe.is_public() {
+          continue;
         }
 
-        // Declaring this outside of the nested loops will probably be more efficient,
-        // but it creates all sorts of lifetime issues with variables inside the loops.
-        // If this is inlined like the docs say, it shouldn't make any difference.
-        let print_doc = |doc| {
-          print!(
-            " {:padding$}{} {}",
-            "",
-            doc_color.paint("#"),
-            doc_color.paint(doc),
-            padding = max_line_width
-              .saturating_sub(line_widths.get(name).cloned().unwrap_or(max_line_width))
+        for name in iter::once(name).chain(aliases.get(name).unwrap_or(&Vec::new())) {
+          signature_widths.insert(
+            name,
+            UnicodeWidthStr::width(
+              RecipeSignature { name, recipe }
+                .color_display(Color::never())
+                .to_string()
+                .as_str(),
+            ),
           );
-        };
+        }
+      }
+      for alias in &cross_module_aliases {
+        signature_widths.insert(
+          alias.name.lexeme(),
+          UnicodeWidthStr::width(
+            RecipeSignature {
+              name: alias.name.lexeme(),
+              recipe: &alias.target,
+            }
+            .color_display(Color::never())
+            .to_string()
+            .as_str(),
+          ),
+        );
+      }
 
-        match (i, recipe.doc) {
-          (0, Some(doc)) => print_doc(doc),
-          (0, None) => (),
-          _ => {
-            let alias_doc = format!("alias for `{}`", recipe.name);
-            print_doc(&alias_doc);
+      if !config.list_submodules {
+        for submodule in module.public_modules(config) {
+          let name = submodule.name();
+          signature_widths.insert(name, UnicodeWidthStr::width(format!("{name} ...").as_str()));
+        }
+      }
+
+      signature_widths
+    };
+
+    let max_signature_width = signature_widths
+      .values()
+      .copied()
+      .filter(|width| *width <= MAX_WIDTH)
+      .max()
+      .unwrap_or(0);
+
+    let list_prefix = config.list_prefix.repeat(depth + 1);
+
+    if !groups.is_empty() {
+      let public_groups = module.public_groups(config);
+      for group in groups {
+        if !public_groups.contains(group) {
+          return Err(Error::UnknownGroup {
+            group: group.clone(),
+          });
+        }
+      }
+    }
+
+    if depth == 0 {
+      print!("{}", config.list_heading);
+    }
+
+    let entry_groups = {
+      let mut entry_groups = BTreeMap::<Option<String>, Vec<ListEntry>>::new();
+
+      for recipe in module.public_recipes(config) {
+        let recipe_aliases = aliases
+          .get(recipe.name())
+          .map(Vec::as_slice)
+          .unwrap_or_default();
+
+        let mut entries = vec![ListEntry {
+          aliases: recipe_aliases,
+          comment: recipe.doc().map(Into::into),
+          name: recipe.name(),
+          recipe,
+        }];
+
+        if config.alias_style == AliasStyle::Separate {
+          for name in recipe_aliases {
+            entries.push(ListEntry {
+              aliases: recipe_aliases,
+              comment: Some(format!("alias for `{}`", recipe.name)),
+              name,
+              recipe,
+            });
           }
         }
+
+        let groups = recipe.groups();
+        if groups.is_empty() {
+          entry_groups.entry(None).or_default().extend(entries);
+        } else {
+          for group in groups {
+            entry_groups
+              .entry(Some(group))
+              .or_default()
+              .extend(entries.clone());
+          }
+        }
+      }
+
+      for alias in &cross_module_aliases {
+        entry_groups.entry(None).or_default().push(ListEntry {
+          aliases: &[],
+          comment: Some(format!("alias for `{}`", alias.target.recipe_path())),
+          name: alias.name.lexeme(),
+          recipe: &alias.target,
+        });
+      }
+
+      entry_groups
+    };
+
+    let submodule_groups = {
+      let mut submodule_groups = BTreeMap::<Option<String>, Vec<&Justfile>>::new();
+      for submodule in module.public_modules(config) {
+        let submodule_groups_list = submodule.groups();
+        if submodule_groups_list.is_empty() {
+          submodule_groups.entry(None).or_default().push(submodule);
+        } else {
+          for group in submodule_groups_list {
+            submodule_groups
+              .entry(Some(group.to_string()))
+              .or_default()
+              .push(submodule);
+          }
+        }
+      }
+      submodule_groups
+    };
+
+    let mut ordered_groups = if groups.is_empty() {
+      module
+        .public_groups(config)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<Option<String>>>()
+    } else {
+      groups
+        .iter()
+        .cloned()
+        .map(Some)
+        .collect::<Vec<Option<String>>>()
+    };
+
+    if groups.is_empty()
+      && (entry_groups.contains_key(&None) || submodule_groups.contains_key(&None))
+    {
+      ordered_groups.insert(0, None);
+    }
+
+    let no_groups =
+      groups.is_empty() && ordered_groups.len() == 1 && ordered_groups.first() == Some(&None);
+
+    let groups_count = if no_groups { 0 } else { ordered_groups.len() };
+
+    for (i, group) in ordered_groups.into_iter().enumerate() {
+      if i > 0 {
         println!();
       }
+
+      if !no_groups && let Some(group) = &group {
+        println!(
+          "{list_prefix}{}",
+          config.color.stdout().group().paint(&format!("[{group}]"))
+        );
+      }
+
+      if let Some(entries) = entry_groups.get(&group) {
+        for entry in entries {
+          let inline_comment = signature_widths[entry.name] <= MAX_WIDTH
+            && entry
+              .comment
+              .as_ref()
+              .is_none_or(|doc| doc.lines().count() <= 1);
+
+          if let Some(comment) = &entry.comment
+            && !inline_comment
+          {
+            for line in comment.lines() {
+              println!(
+                "{list_prefix}{} {}",
+                config.color.stdout().doc().paint("#"),
+                config.color.stdout().doc().paint(line),
+              );
+            }
+          }
+
+          print!(
+            "{list_prefix}{}",
+            RecipeSignature {
+              name: entry.name,
+              recipe: entry.recipe
+            }
+            .color_display(config.color.stdout())
+          );
+
+          print_doc_and_aliases(
+            config,
+            entry.name,
+            entry.comment.as_deref().filter(|_| inline_comment),
+            entry.aliases,
+            max_signature_width,
+            &signature_widths,
+          )?;
+        }
+      }
+
+      if let Some(submodules) = submodule_groups.get(&group) {
+        for (i, submodule) in submodules.iter().enumerate() {
+          if config.list_submodules {
+            if no_groups && (i + groups_count > 0) {
+              println!();
+            }
+            println!("{list_prefix}{}:", submodule.name());
+
+            Self::list_module(config, depth + 1, &[], submodule)?;
+          } else {
+            print!("{list_prefix}{} ...", submodule.name());
+            print_doc_and_aliases(
+              config,
+              submodule.name(),
+              submodule.doc.as_deref(),
+              &[],
+              max_signature_width,
+              &signature_widths,
+            )?;
+          }
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  fn show<'src>(config: &Config, module: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
+    let (alias, recipe) = Self::resolve_path(module, path, "show")?;
+
+    if let Some(alias) = alias {
+      println!("{alias}");
+    }
+
+    if !recipe.attributes.contains(AttributeKind::Doc)
+      && let Some(doc) = &recipe.doc
+    {
+      println!("# {doc}");
+    }
+
+    for attribute in &recipe.attributes {
+      println!("[{attribute}]");
+    }
+
+    println!("{}", recipe.color_display(config.color.stdout()));
+
+    Ok(())
+  }
+
+  fn summary(config: &Config, justfile: &Justfile) -> RunResult<'static> {
+    let recipes = justfile.public_recipes_recursive(config);
+
+    for (i, recipe) in recipes.iter().enumerate() {
+      if i > 0 {
+        print!(" ");
+      }
+      print!("{}", recipe.recipe_path());
+    }
+    println!();
+
+    if recipes.is_empty() && config.verbosity.loud() {
+      eprintln!("justfile contains no recipes");
+    }
+
+    Ok(())
+  }
+
+  pub(crate) fn takes_arguments(&self) -> bool {
+    match self {
+      Self::Changelog
+      | Self::Completions { .. }
+      | Self::Dump { .. }
+      | Self::Edit
+      | Self::Format
+      | Self::Groups
+      | Self::Init
+      | Self::Man
+      | Self::Summary
+      | Self::Variables => false,
+      Self::Choose { .. }
+      | Self::Clean { .. }
+      | Self::Command { .. }
+      | Self::Evaluate { .. }
+      | Self::List { .. }
+      | Self::Request { .. }
+      | Self::Run { .. }
+      | Self::Show { .. }
+      | Self::Usage { .. } => true,
     }
   }
 
-  fn show<'src>(config: &Config, name: &str, justfile: Justfile<'src>) -> Result<(), Error<'src>> {
-    if let Some(alias) = justfile.get_alias(name) {
-      let recipe = justfile.get_recipe(alias.target.name.lexeme()).unwrap();
-      println!("{}", alias);
-      println!("{}", recipe.color_display(config.color.stdout()));
-      Ok(())
-    } else if let Some(recipe) = justfile.get_recipe(name) {
-      println!("{}", recipe.color_display(config.color.stdout()));
-      Ok(())
+  fn usage<'src>(config: &Config, root: &Justfile<'src>, path: &Modulepath) -> RunResult<'src> {
+    if let Some(module) = root.submodule(path) {
+      let recipes = module.public_recipes(config);
+
+      if recipes.is_empty() {
+        if config.verbosity.loud() {
+          eprintln!("module contains no recipes");
+        }
+      } else {
+        println!("{}", config.color.stdout().heading().paint("Usage:"));
+        for (i, recipe) in recipes.into_iter().enumerate() {
+          if i > 0 {
+            println!();
+          }
+
+          let path = Modulepath {
+            spaced: true,
+            ..path.join(recipe.name())
+          };
+
+          println!(
+            "{}",
+            Usage {
+              mode: usage::Mode::Module,
+              path: &path,
+              recipe,
+            }
+            .color_display(config.color.stdout()),
+          );
+        }
+      }
     } else {
-      Err(Error::UnknownRecipes {
-        recipes: vec![name.to_owned()],
-        suggestion: justfile.suggest_recipe(name),
+      let (alias, recipe) = Self::resolve_path(root, path, "usage")?;
+
+      if let Some(alias) = alias {
+        println!("{alias}");
+      }
+
+      println!(
+        "{}",
+        Usage {
+          mode: usage::Mode::Recipe,
+          path,
+          recipe
+        }
+        .color_display(config.color.stdout()),
+      );
+    }
+
+    Ok(())
+  }
+
+  fn resolve_module<'src, 'run>(
+    root: &'run Justfile<'src>,
+    path: &Modulepath,
+    components: &[String],
+  ) -> RunResult<'src, &'run Justfile<'src>> {
+    let mut module = root;
+
+    for name in components {
+      if let Some(submodule) = module.modules.get(name) {
+        module = submodule;
+      } else if let Some(alias) = module.module_aliases.get(name) {
+        module = root.submodule(&alias.target).unwrap();
+      } else if module.absent_modules.contains(name) {
+        return Err(Error::ModuleAbsent {
+          module: module.module_path.join(name),
+        });
+      } else {
+        return Err(Error::UnknownSubmodule {
+          path: path.to_string(),
+          suggestion: module.suggest_submodule(name),
+        });
+      }
+    }
+
+    Ok(module)
+  }
+
+  fn resolve_path<'src, 'run>(
+    root: &'run Justfile<'src>,
+    path: &Modulepath,
+    subcommand: &'static str,
+  ) -> RunResult<'src, (Option<&'run RecipeAlias<'src>>, &'run Recipe<'src>)> {
+    let Some((name, ancestors)) = path.components.split_last() else {
+      return Err(Error::RecipeRequired { subcommand });
+    };
+
+    let module = Self::resolve_module(root, path, ancestors)?;
+
+    if let Some(alias) = module.recipe_alias(name) {
+      Ok((Some(alias), &alias.target))
+    } else if let Some(recipe) = module.recipe(name) {
+      Ok((None, recipe))
+    } else if let Some(disabled) = module.disabled_recipes.get(name) {
+      Err(Error::RecipeDisabled {
+        recipe: path.clone(),
+        modules: disabled.modules.clone(),
+      })
+    } else if let Some(disabled) = module.disabled_aliases.get(name) {
+      Err(Error::AliasDisabled {
+        alias: path.clone(),
+        modules: disabled.modules.clone(),
+      })
+    } else if module.absent_modules.contains(name) {
+      Err(Error::ModuleAbsent {
+        module: module.module_path.join(name),
+      })
+    } else {
+      Err(Error::UnknownRecipe {
+        recipe: name.to_owned(),
+        suggestion: module.suggest_recipe(name),
       })
     }
   }
 
-  fn summary(config: &Config, justfile: Justfile) {
-    if justfile.count() == 0 {
-      if config.verbosity.loud() {
-        eprintln!("Justfile contains no recipes.");
-      }
-    } else {
-      let summary = justfile
-        .public_recipes(config.unsorted)
-        .iter()
-        .map(|recipe| recipe.name())
-        .collect::<Vec<&str>>()
-        .join(" ");
-      println!("{}", summary);
-    }
-  }
-
-  fn variables(justfile: Justfile) {
-    for (i, (_, assignment)) in justfile.assignments.iter().enumerate() {
+  fn variables(justfile: &Justfile) -> RunResult<'static> {
+    for (i, (_, assignment)) in justfile
+      .assignments
+      .iter()
+      .filter(|(_, binding)| !binding.private)
+      .enumerate()
+    {
       if i > 0 {
         print!(" ");
       }
       print!("{}", assignment.name);
     }
     println!();
+    Ok(())
   }
 }
 

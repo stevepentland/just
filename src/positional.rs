@@ -1,4 +1,4 @@
-use crate::common::*;
+use super::*;
 
 /// A struct containing the parsed representation of positional command-line
 /// arguments, i.e. arguments that are not flags, options, or the subcommand.
@@ -18,7 +18,7 @@ use crate::common::*;
 /// - Everything else is an argument.
 ///
 /// Overrides set the values of top-level variables in the justfile being
-/// invoked and are a convenient way to override settings.
+/// invoked.
 ///
 /// For modes that do not take other arguments, the search directory argument
 /// determines where to begin searching for the justfile.  This allows command
@@ -26,67 +26,55 @@ use crate::common::*;
 ///
 /// For modes that do take other arguments, the search argument is simply
 /// prepended to rest.
-#[cfg_attr(test, derive(PartialEq, Debug))]
-pub struct Positional {
+#[cfg_attr(test, derive(PartialEq, Eq, Debug))]
+pub(crate) struct Positional {
+  /// Everything else
+  pub arguments: Vec<String>,
   /// Overrides from values of the form `[a-zA-Z_][a-zA-Z0-9_-]*=.*`
   pub overrides: Vec<(String, String)>,
   /// An argument equal to '.', '..', or ending with `/`
   pub search_directory: Option<String>,
-  /// Everything else
-  pub arguments: Vec<String>,
 }
 
 impl Positional {
-  pub fn from_values<'values>(values: Option<impl IntoIterator<Item = &'values str>>) -> Self {
+  pub(crate) fn from_values<'values>(values: impl IntoIterator<Item = &'values str>) -> Self {
     let mut overrides = Vec::new();
     let mut search_directory = None;
     let mut arguments = Vec::new();
 
-    if let Some(values) = values {
-      for value in values {
-        if search_directory.is_none() && arguments.is_empty() {
-          if let Some(o) = Self::override_from_value(value) {
-            overrides.push(o);
-          } else if value == "." || value == ".." {
-            search_directory = Some(value.to_owned());
-          } else if let Some(i) = value.rfind('/') {
-            let (dir, tail) = value.split_at(i + 1);
+    for value in values {
+      if search_directory.is_none() && arguments.is_empty() {
+        if let Some(o) = Self::override_from_value(value) {
+          overrides.push(o);
+        } else if value == "." || value == ".." {
+          search_directory = Some(value.to_owned());
+        } else if let Some(i) = value.rfind('/') {
+          let (dir, tail) = value.split_at(i + 1);
 
-            search_directory = Some(dir.to_owned());
+          search_directory = Some(dir.to_owned());
 
-            if !tail.is_empty() {
-              arguments.push(tail.to_owned());
-            }
-          } else {
-            arguments.push(value.to_owned());
+          if !tail.is_empty() {
+            arguments.push(tail.to_owned());
           }
         } else {
           arguments.push(value.to_owned());
         }
+      } else {
+        arguments.push(value.to_owned());
       }
     }
 
     Self {
+      arguments,
       overrides,
       search_directory,
-      arguments,
     }
   }
 
   /// Parse an override from a value of the form `NAME=.*`.
   fn override_from_value(value: &str) -> Option<(String, String)> {
-    let equals = value.find('=')?;
-
-    let (identifier, equals_value) = value.split_at(equals);
-
-    // exclude `=` from value
-    let value = &equals_value[1..];
-
-    if Lexer::is_identifier(identifier) {
-      Some((identifier.to_owned(), value.to_owned()))
-    } else {
-      None
-    }
+    let (path, value) = value.split_once('=')?;
+    Some((path.into(), value.into()))
   }
 }
 
@@ -107,7 +95,7 @@ mod tests {
       #[test]
       fn $name() {
         assert_eq! (
-          Positional::from_values(Some($vals.iter().cloned())),
+          Positional::from_values($vals.iter().cloned()),
           Positional {
             overrides: $overrides
               .iter()
@@ -144,14 +132,6 @@ mod tests {
     overrides: [("foo", "bar"), ("bar", "foo")],
     search_directory: None,
     arguments: [],
-  }
-
-  test! {
-    name: override_not_name,
-    values: ["foo=bar", "bar.=foo"],
-    overrides: [("foo", "bar")],
-    search_directory: None,
-    arguments: ["bar.=foo"],
   }
 
   test! {

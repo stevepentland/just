@@ -1,10 +1,10 @@
-use crate::common::*;
+use super::*;
 
 pub(crate) trait Keyed<'key> {
   fn key(&self) -> &'key str;
 }
 
-impl<'key, T: Keyed<'key>> Keyed<'key> for Rc<T> {
+impl<'key, T: Keyed<'key>> Keyed<'key> for Arc<T> {
   fn key(&self) -> &'key str {
     self.as_ref().key()
   }
@@ -15,9 +15,10 @@ where
   S: Serializer,
   K: Keyed<'src>,
 {
-  serializer.serialize_str(&keyed.key())
+  serializer.serialize_str(keyed.key())
 }
 
+#[allow(clippy::ref_option)]
 pub(crate) fn serialize_option<'src, S, K>(
   recipe: &Option<K>,
   serializer: S,

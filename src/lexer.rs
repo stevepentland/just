@@ -1,7 +1,7 @@
-use crate::common::*;
+use {super::*, CompileErrorKind::*, TokenKind::*};
 
-use CompileErrorKind::*;
-use TokenKind::*;
+static DEDENT_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"^[ \t\r\n]*\n[^ \t\r\n]").unwrap());
 
 /// Just language lexer
 ///
@@ -12,38 +12,52 @@ use TokenKind::*;
 /// slight against regular expressions, the lexer was just idiosyncratically
 /// bad.
 pub(crate) struct Lexer<'src> {
-  /// Source text
-  src: &'src str,
   /// Char iterator
   chars: Chars<'src>,
-  /// Tokens
-  tokens: Vec<Token<'src>>,
-  /// Current token start
-  token_start: Position,
-  /// Current token end
-  token_end: Position,
-  /// Next character to be lexed
-  next: Option<char>,
-  /// Next indent will start a recipe body
-  recipe_body_pending: bool,
-  /// Inside recipe body
-  recipe_body: bool,
+  dropped_comment: Option<Token<'src>>,
   /// Indentation stack
   indentation: Vec<&'src str>,
   /// Interpolation token start stack
   interpolation_stack: Vec<Token<'src>>,
+  /// Source text line count
+  lines: usize,
+  /// Next character to be lexed
+  next: Option<char>,
   /// Current open delimiters
   open_delimiters: Vec<(Delimiter, usize)>,
+  /// Path to source file
+  path: &'src Utf8Path,
+  /// Inside recipe body
+  recipe_body: bool,
+  /// Next indent will start a recipe body
+  recipe_body_pending: bool,
+  /// Source text
+  src: &'src str,
+  /// Current token end
+  token_end: Position,
+  /// Current token start
+  token_start: Position,
+  /// Tokens
+  tokens: Vec<Token<'src>>,
 }
 
 impl<'src> Lexer<'src> {
-  /// Lex `text`
-  pub(crate) fn lex(src: &'src str) -> CompileResult<Vec<Token<'src>>> {
-    Lexer::new(src).tokenize()
+  pub(crate) const INTERPOLATION_END: &'static str = "}}";
+  pub(crate) const INTERPOLATION_ESCAPE: &'static str = "{{{{";
+  pub(crate) const INTERPOLATION_START: &'static str = "{{";
+
+  /// Lex `src`
+  pub(crate) fn lex(path: &'src Utf8Path, src: &'src str) -> CompileResult<'src, Lex<'src>> {
+    Self::new(path, src).tokenize()
   }
 
-  /// Create a new Lexer to lex `text`
-  fn new(src: &'src str) -> Lexer<'src> {
+  #[cfg(test)]
+  pub(crate) fn test_lex(src: &'src str) -> CompileResult<'src, Lex<'src>> {
+    Self::new("justfile".as_ref(), src).tokenize()
+  }
+
+  /// Create a new Lexer to lex `src`
+  fn new(path: &'src Utf8Path, src: &'src str) -> Self {
     let mut chars = src.chars();
     let next = chars.next();
 
@@ -53,24 +67,27 @@ impl<'src> Lexer<'src> {
       line: 0,
     };
 
-    Lexer {
-      indentation: vec![""],
-      tokens: Vec::new(),
-      token_start: start,
-      token_end: start,
-      recipe_body_pending: false,
-      recipe_body: false,
-      interpolation_stack: Vec::new(),
-      open_delimiters: Vec::new(),
+    Self {
       chars,
+      dropped_comment: None,
+      indentation: vec![""],
+      interpolation_stack: Vec::new(),
+      lines: src.lines().count(),
       next,
+      open_delimiters: Vec::new(),
+      path,
+      recipe_body: false,
+      recipe_body_pending: false,
       src,
+      token_end: start,
+      token_start: start,
+      tokens: Vec::new(),
     }
   }
 
   /// Advance over the character in `self.next`, updating `self.token_end`
   /// accordingly.
-  fn advance(&mut self) -> CompileResult<'src, ()> {
+  fn advance(&mut self) -> CompileResult<'src> {
     match self.next {
       Some(c) => {
         let len_utf8 = c.len_utf8();
@@ -78,7 +95,7 @@ impl<'src> Lexer<'src> {
         self.token_end.offset += len_utf8;
         self.token_end.column += len_utf8;
 
-        if c == '\n' {
+        if c == '\n' && self.token_end.line + 1 < self.lines {
           self.token_end.column = 0;
           self.token_end.line += 1;
         }
@@ -89,15 +106,6 @@ impl<'src> Lexer<'src> {
       }
       None => Err(self.internal_error("Lexer advanced past end of text")),
     }
-  }
-
-  /// Advance over N characters.
-  fn skip(&mut self, n: usize) -> CompileResult<'src, ()> {
-    for _ in 0..n {
-      self.advance()?;
-    }
-
-    Ok(())
   }
 
   /// Lexeme of in-progress token
@@ -119,9 +127,9 @@ impl<'src> Lexer<'src> {
     }
   }
 
-  fn presume(&mut self, c: char) -> CompileResult<'src, ()> {
+  fn presume(&mut self, c: char) -> CompileResult<'src> {
     if !self.next_is(c) {
-      return Err(self.internal_error(format!("Lexer presumed character `{}`", c)));
+      return Err(self.internal_error(format!("Lexer presumed character `{c}`")));
     }
 
     self.advance()?;
@@ -129,7 +137,7 @@ impl<'src> Lexer<'src> {
     Ok(())
   }
 
-  fn presume_str(&mut self, s: &str) -> CompileResult<'src, ()> {
+  fn presume_str(&mut self, s: &str) -> CompileResult<'src> {
     for c in s.chars() {
       self.presume(c)?;
     }
@@ -174,7 +182,7 @@ impl<'src> Lexer<'src> {
 
   /// Get current indentation
   fn indentation(&self) -> &'src str {
-    self.indentation.last().cloned().unwrap()
+    self.indentation.last().unwrap()
   }
 
   /// Are we currently indented
@@ -186,16 +194,21 @@ impl<'src> Lexer<'src> {
   /// and `self.token_end`
   fn token(&mut self, kind: TokenKind) {
     self.tokens.push(Token {
-      offset: self.token_start.offset,
       column: self.token_start.column,
-      line: self.token_start.line,
-      src: self.src,
-      length: self.token_end.offset - self.token_start.offset,
       kind,
+      length: self.token_end.offset - self.token_start.offset,
+      line: self.token_start.line,
+      offset: self.token_start.offset,
+      path: self.path,
+      src: self.src,
     });
 
     // Set `token_start` to point after the lexed token
     self.token_start = self.token_end;
+  }
+
+  fn last_token(&self) -> Token<'src> {
+    *self.tokens.last().unwrap()
   }
 
   /// Create an internal error with `message`
@@ -208,13 +221,14 @@ impl<'src> Lexer<'src> {
       column: self.token_end.column,
       length: 0,
       kind: Unspecified,
+      path: self.path,
     };
-    CompileError {
-      kind: CompileErrorKind::Internal {
+    CompileError::new(
+      token,
+      Internal {
         message: message.into(),
       },
-      token,
-    }
+    )
   }
 
   /// Create a compilation error with `kind`
@@ -224,13 +238,14 @@ impl<'src> Lexer<'src> {
     // The width of the error site to highlight depends on the kind of error:
     let length = match kind {
       UnterminatedString | UnterminatedBacktick => {
-        let kind = match StringKind::from_token_start(self.lexeme()) {
-          Some(kind) => kind,
-          None => {
-            return self.internal_error("Lexer::error: expected string or backtick token start")
-          }
-        };
-        kind.delimiter().len()
+        if self.lexeme().starts_with(Self::INTERPOLATION_END) {
+          Self::INTERPOLATION_END.len()
+        } else {
+          let Some(kind) = StringKind::from_token_start(self.lexeme()) else {
+            return self.internal_error("Lexer::error: expected string or backtick token start");
+          };
+          kind.delimiter().len()
+        }
       }
       // highlight the full token
       _ => self.lexeme().len(),
@@ -243,49 +258,28 @@ impl<'src> Lexer<'src> {
       line: self.token_start.line,
       column: self.token_start.column,
       length,
+      path: self.path,
     };
 
-    CompileError { token, kind }
+    CompileError::new(token, kind)
   }
 
   fn unterminated_interpolation_error(interpolation_start: Token<'src>) -> CompileError<'src> {
-    CompileError {
-      token: interpolation_start,
-      kind: UnterminatedInterpolation,
-    }
-  }
-
-  /// True if `text` could be an identifier
-  pub(crate) fn is_identifier(text: &str) -> bool {
-    if !text.chars().next().map_or(false, Self::is_identifier_start) {
-      return false;
-    }
-
-    for c in text.chars().skip(1) {
-      if !Self::is_identifier_continue(c) {
-        return false;
-      }
-    }
-
-    true
+    CompileError::new(interpolation_start, UnterminatedInterpolation)
   }
 
   /// True if `c` can be the first character of an identifier
-  fn is_identifier_start(c: char) -> bool {
+  pub(crate) fn is_identifier_start(c: char) -> bool {
     matches!(c, 'a'..='z' | 'A'..='Z' | '_')
   }
 
-  /// True if `c` can be a continuation character of an idenitifier
-  fn is_identifier_continue(c: char) -> bool {
-    if Self::is_identifier_start(c) {
-      return true;
-    }
-
-    matches!(c, '0'..='9' | '-')
+  /// True if `c` can be a continuation character of an identifier
+  pub(crate) fn is_identifier_continue(c: char) -> bool {
+    Self::is_identifier_start(c) || matches!(c, '0'..='9' | '-')
   }
 
   /// Consume the text and produce a series of tokens
-  fn tokenize(mut self) -> CompileResult<'src, Vec<Token<'src>>> {
+  fn tokenize(mut self) -> CompileResult<'src, Lex<'src>> {
     loop {
       if self.token_start.column == 0 {
         self.lex_line_start()?;
@@ -299,7 +293,7 @@ impl<'src> Lexer<'src> {
             self.lex_body()?;
           } else {
             self.lex_normal(first)?;
-          };
+          }
         }
         None => break,
       }
@@ -319,11 +313,14 @@ impl<'src> Lexer<'src> {
     assert_eq!(self.token_start.offset, self.src.len());
     assert_eq!(self.indentation.len(), 1);
 
-    Ok(self.tokens)
+    Ok(Lex {
+      dropped_comment: self.dropped_comment,
+      tokens: self.tokens,
+    })
   }
 
   /// Handle blank lines and indentation
-  fn lex_line_start(&mut self) -> CompileResult<'src, ()> {
+  fn lex_line_start(&mut self) -> CompileResult<'src> {
     enum Indentation<'src> {
       // Line only contains whitespace
       Blank,
@@ -343,22 +340,31 @@ impl<'src> Lexer<'src> {
 
     let nonblank_index = self
       .rest()
-      .char_indices()
-      .skip_while(|&(_, c)| c == ' ' || c == '\t')
-      .map(|(i, _)| i)
-      .next()
-      .unwrap_or_else(|| self.rest().len());
+      .find(|c| !matches!(c, ' ' | '\t'))
+      .unwrap_or(self.rest().len());
 
     let rest = &self.rest()[nonblank_index..];
 
     let whitespace = &self.rest()[..nonblank_index];
 
-    let body_whitespace = &whitespace[..whitespace
+    if self.open_delimiters_or_interpolation() {
+      if !whitespace.is_empty() {
+        while self.next_is_whitespace() {
+          self.advance()?;
+        }
+
+        self.token(Whitespace);
+      }
+
+      return Ok(());
+    }
+
+    let indentation = whitespace
       .char_indices()
-      .take(self.indentation().chars().count())
-      .map(|(i, _c)| i)
-      .next()
-      .unwrap_or(0)];
+      .nth(self.indentation().chars().count())
+      .map_or(whitespace.len(), |(i, _c)| i);
+
+    let body_whitespace = &whitespace[..indentation];
 
     let spaces = whitespace.chars().any(|c| c == ' ');
     let tabs = whitespace.chars().any(|c| c == '\t');
@@ -398,13 +404,19 @@ impl<'src> Lexer<'src> {
 
     match indentation {
       Blank => {
+        if DEDENT_RE.is_match(self.rest()) {
+          while self.indented() {
+            self.lex_dedent();
+          }
+        }
+
         if !whitespace.is_empty() {
           while self.next_is_whitespace() {
             self.advance()?;
           }
 
           self.token(Whitespace);
-        };
+        }
 
         Ok(())
       }
@@ -456,15 +468,11 @@ impl<'src> Lexer<'src> {
           self.advance()?;
         }
 
-        if self.open_delimiters() {
-          self.token(Whitespace);
-        } else {
-          let indentation = self.lexeme();
-          self.indentation.push(indentation);
-          self.token(Indent);
-          if self.recipe_body_pending {
-            self.recipe_body = true;
-          }
+        let indentation = self.lexeme();
+        self.indentation.push(indentation);
+        self.token(Indent);
+        if self.recipe_body_pending {
+          self.recipe_body = true;
         }
 
         Ok(())
@@ -473,32 +481,52 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex token beginning with `start` outside of a recipe body
-  fn lex_normal(&mut self, start: char) -> CompileResult<'src, ()> {
+  fn lex_normal(&mut self, start: char) -> CompileResult<'src> {
     match start {
       ' ' | '\t' => self.lex_whitespace(),
-      '!' => self.lex_digraph('!', '=', BangEquals),
+      '!' => self.lex_choices('!', &[('=', BangEquals), ('~', BangTilde)], Bang),
       '#' => self.lex_comment(),
       '$' => self.lex_single(Dollar),
       '&' => self.lex_digraph('&', '&', AmpersandAmpersand),
       '(' => self.lex_delimiter(ParenL),
       ')' => self.lex_delimiter(ParenR),
       '*' => self.lex_single(Asterisk),
-      '+' => self.lex_single(Plus),
+      '+' => self.lex_choices('+', &[('+', PlusPlus)], Plus),
       ',' => self.lex_single(Comma),
+      '/' => self.lex_single(Slash),
       ':' => self.lex_colon(),
       '=' => self.lex_choices('=', &[('=', EqualsEquals), ('~', EqualsTilde)], Equals),
+      '?' => self.lex_single(QuestionMark),
       '@' => self.lex_single(At),
       '[' => self.lex_delimiter(BracketL),
+      '\\' => self.lex_escape(),
       '\n' | '\r' => self.lex_eol(),
       '\u{feff}' => self.lex_single(ByteOrderMark),
       ']' => self.lex_delimiter(BracketR),
-      '`' | '"' | '\'' => self.lex_string(),
+      '`' | '"' | '\'' => self.lex_string(None),
       '{' => self.lex_delimiter(BraceL),
-      '}' => self.lex_delimiter(BraceR),
+      '|' => self.lex_digraph('|', '|', BarBar),
+      '}' => {
+        let format_string_kind = self.open_delimiters.last().and_then(|(delimiter, _line)| {
+          if !self.rest().starts_with(Self::INTERPOLATION_END) {
+            None
+          } else if let Delimiter::FormatString(kind) = delimiter {
+            Some(kind)
+          } else {
+            None
+          }
+        });
+
+        if let Some(format_string_kind) = format_string_kind {
+          self.lex_string(Some(*format_string_kind))
+        } else {
+          self.lex_delimiter(BraceR)
+        }
+      }
       _ if Self::is_identifier_start(start) => self.lex_identifier(),
       _ => {
         self.advance()?;
-        Err(self.error(UnknownStartOfToken))
+        Err(self.error(UnknownStartOfToken { start }))
       }
     }
   }
@@ -508,19 +536,18 @@ impl<'src> Lexer<'src> {
     &mut self,
     interpolation_start: Token<'src>,
     start: char,
-  ) -> CompileResult<'src, ()> {
-    if self.rest_starts_with("}}") {
+  ) -> CompileResult<'src> {
+    if self.rest_starts_with(Self::INTERPOLATION_END) && self.open_delimiters.is_empty() {
       // end current interpolation
       if self.interpolation_stack.pop().is_none() {
-        self.advance()?;
-        self.advance()?;
+        self.presume_str(Self::INTERPOLATION_END)?;
         return Err(self.internal_error(
           "Lexer::lex_interpolation found `}}` but was called with empty interpolation stack.",
         ));
       }
       // Emit interpolation end token
       self.lex_double(InterpolationEnd)
-    } else if self.at_eol_or_eof() {
+    } else if self.at_eof() && self.open_delimiters.is_empty() {
       // Return unterminated interpolation error that highlights the opening
       // {{
       Err(Self::unterminated_interpolation_error(interpolation_start))
@@ -531,19 +558,19 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex token while in recipe body
-  fn lex_body(&mut self) -> CompileResult<'src, ()> {
+  fn lex_body(&mut self) -> CompileResult<'src> {
     enum Terminator {
+      EndOfFile,
+      Interpolation,
       Newline,
       NewlineCarriageReturn,
-      Interpolation,
-      EndOfFile,
     }
 
     use Terminator::*;
 
     let terminator = loop {
-      if self.rest_starts_with("{{{{") {
-        self.skip(4)?;
+      if self.rest_starts_with(Self::INTERPOLATION_ESCAPE) {
+        self.presume_str(Self::INTERPOLATION_ESCAPE)?;
         continue;
       }
 
@@ -555,7 +582,7 @@ impl<'src> Lexer<'src> {
         break NewlineCarriageReturn;
       }
 
-      if self.rest_starts_with("{{") {
+      if self.rest_starts_with(Self::INTERPOLATION_START) {
         break Interpolation;
       }
 
@@ -576,9 +603,7 @@ impl<'src> Lexer<'src> {
       NewlineCarriageReturn => self.lex_double(Eol),
       Interpolation => {
         self.lex_double(InterpolationStart)?;
-        self
-          .interpolation_stack
-          .push(self.tokens[self.tokens.len() - 1]);
+        self.interpolation_stack.push(self.last_token());
         Ok(())
       }
       EndOfFile => Ok(()),
@@ -594,14 +619,14 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex a single-character token
-  fn lex_single(&mut self, kind: TokenKind) -> CompileResult<'src, ()> {
+  fn lex_single(&mut self, kind: TokenKind) -> CompileResult<'src> {
     self.advance()?;
     self.token(kind);
     Ok(())
   }
 
   /// Lex a double-character token
-  fn lex_double(&mut self, kind: TokenKind) -> CompileResult<'src, ()> {
+  fn lex_double(&mut self, kind: TokenKind) -> CompileResult<'src> {
     self.advance()?;
     self.advance()?;
     self.token(kind);
@@ -616,7 +641,7 @@ impl<'src> Lexer<'src> {
     first: char,
     choices: &[(char, TokenKind)],
     otherwise: TokenKind,
-  ) -> CompileResult<'src, ()> {
+  ) -> CompileResult<'src> {
     self.presume(first)?;
 
     for (second, then) in choices {
@@ -632,26 +657,25 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex an opening or closing delimiter
-  fn lex_delimiter(&mut self, kind: TokenKind) -> CompileResult<'src, ()> {
-    use Delimiter::*;
-
+  fn lex_delimiter(&mut self, kind: TokenKind) -> CompileResult<'src> {
     match kind {
-      BraceL => self.open_delimiter(Brace),
-      BraceR => self.close_delimiter(Brace)?,
-      BracketL => self.open_delimiter(Bracket),
-      BracketR => self.close_delimiter(Bracket)?,
-      ParenL => self.open_delimiter(Paren),
-      ParenR => self.close_delimiter(Paren)?,
+      BraceL => self.open_delimiter(Delimiter::Brace),
+      BraceR => self.close_delimiter(Delimiter::Brace)?,
+      BracketL => self.open_delimiter(Delimiter::Bracket),
+      BracketR => self.close_delimiter(Delimiter::Bracket)?,
+      ParenL => self.open_delimiter(Delimiter::Paren),
+      ParenR => self.close_delimiter(Delimiter::Paren)?,
       _ => {
         return Err(self.internal_error(format!(
-          "Lexer::lex_delimiter called with non-delimiter token: `{}`",
-          kind,
-        )))
+          "Lexer::lex_delimiter called with non-delimiter token: `{kind}`",
+        )));
       }
     }
 
     // Emit the delimiter token
-    self.lex_single(kind)
+    self.lex_single(kind)?;
+
+    Ok(())
   }
 
   /// Push a delimiter onto the open delimiter stack
@@ -662,7 +686,7 @@ impl<'src> Lexer<'src> {
   }
 
   /// Pop a delimiter from the open delimiter stack and error if incorrect type
-  fn close_delimiter(&mut self, close: Delimiter) -> CompileResult<'src, ()> {
+  fn close_delimiter(&mut self, close: Delimiter) -> CompileResult<'src> {
     match self.open_delimiters.pop() {
       Some((open, _)) if open == close => Ok(()),
       Some((open, open_line)) => Err(self.error(MismatchedClosingDelimiter {
@@ -675,12 +699,12 @@ impl<'src> Lexer<'src> {
   }
 
   /// Return true if there are any unclosed delimiters
-  fn open_delimiters(&self) -> bool {
-    !self.open_delimiters.is_empty()
+  fn open_delimiters_or_interpolation(&self) -> bool {
+    !self.open_delimiters.is_empty() || !self.interpolation_stack.is_empty()
   }
 
   /// Lex a two-character digraph
-  fn lex_digraph(&mut self, left: char, right: char, token: TokenKind) -> CompileResult<'src, ()> {
+  fn lex_digraph(&mut self, left: char, right: char, token: TokenKind) -> CompileResult<'src> {
     self.presume(left)?;
 
     if self.accepted(right)? {
@@ -691,22 +715,29 @@ impl<'src> Lexer<'src> {
       self.token(Unspecified);
 
       if self.at_eof() {
-        return Err(self.error(UnexpectedEndOfToken { expected: right }));
+        return Err(self.error(UnexpectedEndOfToken {
+          expected: vec![right],
+        }));
       }
 
       // …and advance past another character,
       self.advance()?;
+
       // …so that the error we produce highlights the unexpected character.
-      Err(self.error(UnexpectedCharacter { expected: right }))
+      Err(self.error(UnexpectedCharacter {
+        expected: vec![right],
+      }))
     }
   }
 
   /// Lex a token starting with ':'
-  fn lex_colon(&mut self) -> CompileResult<'src, ()> {
+  fn lex_colon(&mut self) -> CompileResult<'src> {
     self.presume(':')?;
 
     if self.accepted('=')? {
       self.token(ColonEquals);
+    } else if self.accepted(':')? {
+      self.token(ColonColon);
     } else {
       self.token(Colon);
       self.recipe_body_pending = true;
@@ -715,8 +746,35 @@ impl<'src> Lexer<'src> {
     Ok(())
   }
 
+  /// Lex an token starting with '\' escape
+  fn lex_escape(&mut self) -> CompileResult<'src> {
+    self.presume('\\')?;
+
+    // Treat newline escaped with \ as whitespace
+    if self.accepted('\n')? {
+      while self.next_is_whitespace() {
+        self.advance()?;
+      }
+      self.token(Whitespace);
+    } else if self.accepted('\r')? {
+      if !self.accepted('\n')? {
+        return Err(self.error(UnpairedCarriageReturn));
+      }
+      while self.next_is_whitespace() {
+        self.advance()?;
+      }
+      self.token(Whitespace);
+    } else if let Some(character) = self.next {
+      return Err(self.error(InvalidEscapeSequence { character }));
+    } else {
+      return Err(self.error(EscapeEndOfFile));
+    }
+
+    Ok(())
+  }
+
   /// Lex a carriage return and line feed
-  fn lex_eol(&mut self) -> CompileResult<'src, ()> {
+  fn lex_eol(&mut self) -> CompileResult<'src> {
     if self.accepted('\r')? {
       if !self.accepted('\n')? {
         return Err(self.error(UnpairedCarriageReturn));
@@ -725,9 +783,8 @@ impl<'src> Lexer<'src> {
       self.presume('\n')?;
     }
 
-    // Emit an eol if there are no open delimiters, otherwise emit a whitespace
-    // token.
-    if self.open_delimiters() {
+    // Emit eol if there are no open delimiters, otherwise emit whitespace.
+    if self.open_delimiters_or_interpolation() {
       self.token(Whitespace);
     } else {
       self.token(Eol);
@@ -737,7 +794,7 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex name: [a-zA-Z_][a-zA-Z0-9_]*
-  fn lex_identifier(&mut self) -> CompileResult<'src, ()> {
+  fn lex_identifier(&mut self) -> CompileResult<'src> {
     self.advance()?;
 
     while let Some(c) = self.next {
@@ -754,20 +811,25 @@ impl<'src> Lexer<'src> {
   }
 
   /// Lex comment: #[^\r\n]
-  fn lex_comment(&mut self) -> CompileResult<'src, ()> {
+  fn lex_comment(&mut self) -> CompileResult<'src> {
     self.presume('#')?;
 
     while !self.at_eol_or_eof() {
       self.advance()?;
     }
 
-    self.token(Comment);
+    if self.open_delimiters_or_interpolation() {
+      self.token(Whitespace);
+      self.dropped_comment.get_or_insert(self.last_token());
+    } else {
+      self.token(Comment);
+    }
 
     Ok(())
   }
 
   /// Lex whitespace: [ \t]+
-  fn lex_whitespace(&mut self) -> CompileResult<'src, ()> {
+  fn lex_whitespace(&mut self) -> CompileResult<'src> {
     while self.next_is_whitespace() {
       self.advance()?;
     }
@@ -779,27 +841,46 @@ impl<'src> Lexer<'src> {
 
   /// Lex a backtick, cooked string, or raw string.
   ///
-  /// Backtick:      `[^`]*`
+  /// Backtick:      ``[^`]*``
   /// Cooked string: "[^"]*" # also processes escape sequences
   /// Raw string:    '[^']*'
-  fn lex_string(&mut self) -> CompileResult<'src, ()> {
-    let kind = if let Some(kind) = StringKind::from_token_start(self.rest()) {
+  fn lex_string(&mut self, format_string_kind: Option<StringKind>) -> CompileResult<'src> {
+    let kind = if let Some(kind) = format_string_kind {
+      self.presume_str(Self::INTERPOLATION_END)?;
       kind
     } else {
-      self.advance()?;
-      return Err(self.internal_error("Lexer::lex_string: invalid string start"));
+      let Some(kind) = StringKind::from_token_start(self.rest()) else {
+        self.advance()?;
+        return Err(self.internal_error("Lexer::lex_string: invalid string start"));
+      };
+      self.presume_str(kind.delimiter())?;
+      kind
     };
 
-    self.presume_str(kind.delimiter())?;
+    let format = format_string_kind.is_some()
+      || kind.delimiter != StringDelimiter::Backtick
+        && self.tokens.last().is_some_and(|token| {
+          token.kind == TokenKind::Identifier && token.lexeme() == Keyword::F.lexeme()
+        });
 
     let mut escape = false;
 
     loop {
-      if self.next == None {
+      if self.next.is_none() {
         return Err(self.error(kind.unterminated_error_kind()));
-      } else if kind.processes_escape_sequences() && self.next_is('\\') && !escape {
+      } else if !escape && kind.processes_escape_sequences() && self.next_is('\\') {
         escape = true;
-      } else if self.rest_starts_with(kind.delimiter()) && !escape {
+      } else if escape && kind.processes_escape_sequences() && self.next_is('u') {
+        escape = false;
+      } else if format && self.rest_starts_with(Self::INTERPOLATION_ESCAPE) {
+        escape = false;
+        self.advance()?;
+        self.advance()?;
+        self.advance()?;
+      } else if !escape
+        && (self.rest_starts_with(kind.delimiter())
+          || format && self.rest_starts_with(Self::INTERPOLATION_START))
+      {
         break;
       } else {
         escape = false;
@@ -808,8 +889,24 @@ impl<'src> Lexer<'src> {
       self.advance()?;
     }
 
-    self.presume_str(kind.delimiter())?;
-    self.token(kind.token_kind());
+    if format && self.rest_starts_with(Self::INTERPOLATION_START) {
+      self.presume_str(Self::INTERPOLATION_START)?;
+      if format_string_kind.is_some() {
+        self.token(FormatStringContinue);
+      } else {
+        self.token(FormatStringStart);
+        self.open_delimiter(Delimiter::FormatString(kind));
+      }
+    } else {
+      self.presume_str(kind.delimiter())?;
+
+      if let Some(format_string_kind) = format_string_kind {
+        self.close_delimiter(Delimiter::FormatString(format_string_kind))?;
+        self.token(FormatStringEnd);
+      } else {
+        self.token(kind.token_kind());
+      }
+    }
 
     Ok(())
   }
@@ -866,6 +963,7 @@ mod tests {
     }
   }
 
+  #[track_caller]
   fn test(text: &str, unindent_text: bool, want_kinds: &[TokenKind], want_lexemes: &[&str]) {
     let text = if unindent_text {
       unindent(text)
@@ -873,7 +971,7 @@ mod tests {
       text.to_owned()
     };
 
-    let have = Lexer::lex(&text).unwrap();
+    let have = Lexer::test_lex(&text).unwrap().tokens;
 
     let have_kinds = have
       .iter()
@@ -882,8 +980,8 @@ mod tests {
 
     let have_lexemes = have.iter().map(Token::lexeme).collect::<Vec<&str>>();
 
-    assert_eq!(have_kinds, want_kinds, "Token kind mismatch");
-    assert_eq!(have_lexemes, want_lexemes, "Token lexeme mismatch");
+    assert_eq!(have_kinds, want_kinds, "token kind mismatch");
+    assert_eq!(have_lexemes, want_lexemes, "token lexeme mismatch");
 
     let mut roundtrip = String::new();
 
@@ -891,20 +989,22 @@ mod tests {
       roundtrip.push_str(lexeme);
     }
 
-    assert_eq!(roundtrip, text, "Roundtrip mismatch");
+    assert_eq!(roundtrip, text, "roundtrip mismatch");
+
+    let lines = text.lines().count();
 
     let mut offset = 0;
     let mut line = 0;
     let mut column = 0;
 
     for token in have {
-      assert_eq!(token.offset, offset);
-      assert_eq!(token.line, line);
-      assert_eq!(token.lexeme().len(), token.length);
-      assert_eq!(token.column, column);
+      assert_eq!(token.offset, offset, "offset mismatch");
+      assert_eq!(token.line, line, "line mismatch");
+      assert_eq!(token.lexeme().len(), token.length, "length mismatch");
+      assert_eq!(token.column, column, "column mismatch");
 
       for c in token.lexeme().chars() {
-        if c == '\n' {
+        if c == '\n' && line + 1 < lines {
           line += 1;
           column = 0;
         } else {
@@ -922,13 +1022,17 @@ mod tests {
       AmpersandAmpersand => "&&",
       Asterisk => "*",
       At => "@",
+      Bang => "!",
       BangEquals => "!=",
+      BangTilde => "!~",
+      BarBar => "||",
       BraceL => "{",
       BraceR => "}",
       BracketL => "[",
       BracketR => "]",
       ByteOrderMark => "\u{feff}",
       Colon => ":",
+      ColonColon => "::",
       ColonEquals => ":=",
       Comma => ",",
       Dollar => "$",
@@ -942,14 +1046,18 @@ mod tests {
       ParenL => "(",
       ParenR => ")",
       Plus => "+",
+      PlusPlus => "++",
+      QuestionMark => "?",
+      Slash => "/",
       Whitespace => " ",
 
       // Empty lexemes
       Dedent | Eof => "",
 
       // Variable lexemes
-      Text | StringToken | Backtick | Identifier | Comment | Unspecified => {
-        panic!("Token {:?} has no default lexeme", kind)
+      Backtick | Comment | FormatStringContinue | FormatStringEnd | FormatStringStart
+      | Identifier | StringToken | Text | Unspecified => {
+        panic!("Token {kind:?} has no default lexeme")
       }
     }
   }
@@ -971,6 +1079,7 @@ mod tests {
     };
   }
 
+  #[track_caller]
   fn error(
     src: &str,
     offset: usize,
@@ -979,7 +1088,7 @@ mod tests {
     length: usize,
     kind: CompileErrorKind,
   ) {
-    match Lexer::lex(src) {
+    match Lexer::test_lex(src) {
       Ok(_) => panic!("Lexing succeeded but expected"),
       Err(have) => {
         let want = CompileError {
@@ -990,8 +1099,9 @@ mod tests {
             line,
             column,
             length,
+            path: "justfile".as_ref(),
           },
-          kind,
+          kind: kind.into(),
         };
         assert_eq!(have, want);
       }
@@ -1059,6 +1169,12 @@ mod tests {
   }
 
   test! {
+    name:   plus_plus,
+    text:   "++",
+    tokens: (PlusPlus),
+  }
+
+  test! {
     name:   equals,
     text:   "=",
     tokens: (Equals),
@@ -1068,6 +1184,12 @@ mod tests {
     name:   equals_equals,
     text:   "==",
     tokens: (EqualsEquals),
+  }
+
+  test! {
+    name:   bang,
+    text:   "!",
+    tokens: (Bang),
   }
 
   test! {
@@ -1107,7 +1229,7 @@ mod tests {
   }
 
   test! {
-    name:   export_concatination,
+    name:   export_concatenation,
     text:   "export foo = 'foo' + 'bar'",
     tokens: (
       Identifier:"export",
@@ -1367,8 +1489,8 @@ mod tests {
       Indent:"    ",
       Text:"a",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"b",
       Colon,
       Eol,
@@ -1415,8 +1537,8 @@ mod tests {
       Indent,
       Text:"@mv a b",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"a",
       Colon,
       Eol,
@@ -1426,8 +1548,8 @@ mod tests {
       Whitespace:"  ",
       Text:"@touch a",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"d",
       Colon,
       Whitespace,
@@ -1436,8 +1558,8 @@ mod tests {
       Indent,
       Text:"@rm c",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"c",
       Colon,
       Whitespace,
@@ -1716,6 +1838,34 @@ mod tests {
   }
 
   test! {
+    name: tokenize_continued_indent,
+    text: "
+      hello:
+        foo
+
+        bar
+
+      baz
+    ",
+    tokens: (
+      Identifier:"hello",
+      Colon,
+      Eol,
+      Indent,
+      Text:"foo",
+      Eol,
+      Eol,
+      Whitespace:"  ",
+      Text:"bar",
+      Eol,
+      Dedent,
+      Eol,
+      Identifier:"baz",
+      Eol,
+    ),
+  }
+
+  test! {
     name: tokenize_empty_lines,
     text: "
 
@@ -1751,8 +1901,8 @@ mod tests {
       Whitespace:"  ",
       Text:"dsdf # whatever",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Comment:"# yolo",
       Eol,
     ),
@@ -1873,8 +2023,8 @@ mod tests {
       Whitespace:"  ",
       Text:"d",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Comment:"# hello",
       Eol,
       Identifier:"bob",
@@ -1933,8 +2083,8 @@ mod tests {
       Indent,
       Text:"@mv a b",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"a",
       Colon,
       Eol,
@@ -1944,8 +2094,8 @@ mod tests {
       Whitespace:"  ",
       Text:"@touch a",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"d",
       Colon,
       Whitespace,
@@ -1954,8 +2104,8 @@ mod tests {
       Indent,
       Text:"@rm c",
       Eol,
-      Eol,
       Dedent,
+      Eol,
       Identifier:"c",
       Colon,
       Whitespace,
@@ -2030,6 +2180,115 @@ mod tests {
     ),
   }
 
+  test! {
+    name:   format_string_empty,
+    text:   "f''",
+    tokens: (
+      Identifier: "f",
+      StringToken: "''",
+    ),
+  }
+
+  test! {
+    name:   format_string_identifier,
+    text:   "f'{{foo}}'",
+    tokens: (
+      Identifier: "f",
+      FormatStringStart: "'{{",
+      Identifier: "foo",
+      FormatStringEnd: "}}'",
+    ),
+  }
+
+  test! {
+    name:   format_string_continue,
+    text:   "f'{{foo}}bar{{baz}}'",
+    tokens: (
+      Identifier: "f",
+      FormatStringStart: "'{{",
+      Identifier: "foo",
+      FormatStringContinue: "}}bar{{",
+      Identifier: "baz",
+      FormatStringEnd: "}}'",
+    ),
+  }
+
+  test! {
+    name:   format_string_whitespace,
+    text:   "f '{{foo}}'",
+    tokens: (
+      Identifier: "f",
+      Whitespace,
+      StringToken: "'{{foo}}'",
+    ),
+  }
+
+  test! {
+    name:   format_string_wrong_identifier,
+    text:   "g'{{foo}}'",
+    tokens: (
+      Identifier: "g",
+      StringToken: "'{{foo}}'",
+    ),
+  }
+
+  test! {
+    name:   format_string_followed_by_recipe,
+    text:   "foo := f'{{'foo'}}{{'bar'}}'\nbar:",
+    tokens: (
+      Identifier: "foo",
+      Whitespace: " ",
+      ColonEquals: ":=",
+      Whitespace: " ",
+      Identifier: "f",
+      FormatStringStart: "'{{",
+      StringToken: "'foo'",
+      FormatStringContinue: "}}{{",
+      StringToken: "'bar'",
+      FormatStringEnd: "}}'",
+      Eol: "\n",
+      Identifier: "bar",
+      Colon,
+    ),
+  }
+
+  test! {
+    name:   indented_format_string_followed_by_recipe,
+    text:   "foo := f'''{{'foo'}}{{'bar'}}'''\nbar:",
+    tokens: (
+      Identifier: "foo",
+      Whitespace: " ",
+      ColonEquals: ":=",
+      Whitespace: " ",
+      Identifier: "f",
+      FormatStringStart: "'''{{",
+      StringToken: "'foo'",
+      FormatStringContinue: "}}{{",
+      StringToken: "'bar'",
+      FormatStringEnd: "}}'''",
+      Eol: "\n",
+      Identifier: "bar",
+      Colon,
+    ),
+  }
+
+  test! {
+    name:   tokenize_recipe_after_body,
+    text:   "foo:\n echo FOO\n\nfoo:",
+    tokens: (
+      Identifier: "foo",
+      Colon,
+      Eol,
+      Indent: " ",
+      Text: "echo FOO",
+      Eol,
+      Dedent,
+      Eol,
+      Identifier: "foo",
+      Colon,
+    ),
+  }
+
   error! {
     name:  tokenize_space_then_tab,
     input: "a:
@@ -2054,8 +2313,8 @@ mod tests {
     offset: 12,
     line:   3,
     column: 0,
-    width:  3,
-    kind:   InconsistentLeadingWhitespace{expected: "\t\t", found: "\t  "},
+    width:  2,
+    kind:   MixedLeadingWhitespace{whitespace: "\t "},
   }
 
   error! {
@@ -2065,7 +2324,7 @@ mod tests {
     line:   0,
     column: 0,
     width:  1,
-    kind:   UnknownStartOfToken,
+    kind:   UnknownStartOfToken { start: '%'},
   }
 
   error! {
@@ -2126,7 +2385,7 @@ mod tests {
     line:   0,
     column: 0,
     width:  1,
-    kind:   UnknownStartOfToken,
+    kind:   UnknownStartOfToken{ start: '-'},
   }
 
   error! {
@@ -2136,7 +2395,7 @@ mod tests {
     line:   0,
     column: 0,
     width:  1,
-    kind:   UnknownStartOfToken,
+    kind:   UnknownStartOfToken { start: '0' },
   }
 
   error! {
@@ -2200,13 +2459,13 @@ mod tests {
   }
 
   error! {
-    name:   unexpected_character_after_bang,
-    input:  "!{",
+    name:   unexpected_character_after_at,
+    input:  "@%",
     offset: 1,
     line:   0,
     column: 1,
     width:  1,
-    kind:   UnexpectedCharacter { expected: '=' },
+    kind:   UnknownStartOfToken { start: '%'},
   }
 
   error! {
@@ -2224,30 +2483,6 @@ mod tests {
   }
 
   error! {
-    name:   bang_eof,
-    input:  "!",
-    offset: 1,
-    line:   0,
-    column: 1,
-    width:  0,
-    kind:   UnexpectedEndOfToken {
-      expected: '=',
-    },
-  }
-
-  error! {
-    name:   bang_unexpected,
-    input:  "!%",
-    offset: 1,
-    line:   0,
-    column: 1,
-    width:  1,
-    kind:   UnexpectedCharacter {
-      expected: '=',
-    },
-  }
-
-  error! {
     name:   ampersand_eof,
     input:  "&",
     offset: 1,
@@ -2255,9 +2490,10 @@ mod tests {
     column: 1,
     width:  0,
     kind:   UnexpectedEndOfToken {
-      expected: '&',
+      expected: vec!['&'],
     },
   }
+
   error! {
     name:   ampersand_unexpected,
     input:  "&%",
@@ -2266,37 +2502,56 @@ mod tests {
     column: 1,
     width:  1,
     kind:   UnexpectedCharacter {
-      expected: '&',
+      expected: vec!['&'],
+    },
+  }
+
+  error! {
+    name:   unclosed_parenthesis_in_interpolation,
+    input:  "a:\n echo {{foo(}}",
+    offset:  15,
+    line:   1,
+    column: 12,
+    width:  0,
+    kind:   MismatchedClosingDelimiter {
+      close: Delimiter::Brace,
+      open: Delimiter::Paren,
+      open_line: 1,
     },
   }
 
   #[test]
   fn presume_error() {
-    let compile_error = Lexer::new("!").presume('-').unwrap_err();
+    let compile_error = Lexer::new("justfile".as_ref(), "!")
+      .presume('-')
+      .unwrap_err();
     assert_matches!(
-      compile_error,
-      CompileError {
-        token: Token {
-          offset: 0,
-          line:   0,
-          column: 0,
-          length: 0,
-          src:    "!",
-          kind:   Unspecified,
-        },
-        kind:  Internal {
-          ref message,
-        },
-      } if message == "Lexer presumed character `-`"
+      compile_error.token,
+      Token {
+        offset: 0,
+        line: 0,
+        column: 0,
+        length: 0,
+        src: "!",
+        kind: Unspecified,
+        path: _,
+      }
+    );
+    assert_matches!(&*compile_error.kind,
+        Internal { message }
+        if message == "Lexer presumed character `-`"
     );
 
     assert_eq!(
       Error::Compile { compile_error }
         .color_display(Color::never())
         .to_string(),
-      "error: Internal error, this may indicate a bug in just: \
-      Lexer presumed character `-`\nconsider filing an issue: \
-      https://github.com/casey/just/issues/new\n  |\n1 | !\n  | ^"
+      "error: internal error, this may indicate a bug in just: Lexer presumed character `-`
+consider filing an issue: https://github.com/casey/just/issues/new
+ ——▶ justfile:1:1
+  │
+1 │ !
+  │ ^"
     );
   }
 }

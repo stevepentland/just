@@ -1,728 +1,402 @@
-use crate::common::*;
-
-use clap::{App, AppSettings, Arg, ArgGroup, ArgMatches, ArgSettings};
-
-// These three strings should be kept in sync:
-pub(crate) const CHOOSER_DEFAULT: &str = "fzf";
-pub(crate) const CHOOSER_ENVIRONMENT_KEY: &str = "JUST_CHOOSER";
-pub(crate) const CHOOSE_HELP: &str = "Select one or more recipes to run using a binary. If \
-                                      `--chooser` is not passed the chooser defaults to the value \
-                                      of $JUST_CHOOSER, falling back to `fzf`";
-
-pub(crate) const DEFAULT_SHELL: &str = "sh";
-pub(crate) const DEFAULT_SHELL_ARG: &str = "-cu";
+use super::*;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Config {
+  pub(crate) alias_style: AliasStyle,
+  pub(crate) allow_missing: bool,
+  pub(crate) ceiling: Option<Utf8PathBuf>,
   pub(crate) check: bool,
   pub(crate) color: Color,
-  pub(crate) dotenv_filename: Option<String>,
-  pub(crate) dotenv_path: Option<PathBuf>,
+  pub(crate) command_color: Option<nu_ansi_term::Color>,
+  pub(crate) complete_aliases: bool,
+  pub(crate) cygpath: Utf8PathBuf,
+  pub(crate) default_list: bool,
+  pub(crate) dotenv_command: Vec<String>,
+  pub(crate) dotenv_filename: Vec<String>,
+  pub(crate) dotenv_path: Vec<String>,
   pub(crate) dry_run: bool,
-  pub(crate) dump_format: DumpFormat,
+  pub(crate) explain: bool,
+  pub(crate) global_fallback_justfile: Option<Utf8PathBuf>,
+  pub(crate) groups: Vec<String>,
   pub(crate) highlight: bool,
-  pub(crate) invocation_directory: PathBuf,
+  pub(crate) indentation: Option<Indentation>,
+  pub(crate) invocation_directory: Utf8PathBuf,
+  pub(crate) jobs: Option<NonZeroU64>,
+  pub(crate) justfile_names: Option<Vec<String>>,
   pub(crate) list_heading: String,
   pub(crate) list_prefix: String,
+  pub(crate) list_submodules: bool,
   pub(crate) load_dotenv: bool,
+  pub(crate) no_aliases: bool,
+  pub(crate) no_cache: bool,
+  pub(crate) no_dependencies: bool,
+  pub(crate) one: bool,
+  pub(crate) overrides: BTreeMap<(Modulepath, String), String>,
   pub(crate) search_config: SearchConfig,
-  pub(crate) shell: String,
-  pub(crate) shell_args: Vec<String>,
+  pub(crate) shell: Option<String>,
+  pub(crate) shell_args: Option<Vec<String>>,
   pub(crate) shell_command: bool,
-  pub(crate) shell_present: bool,
   pub(crate) subcommand: Subcommand,
+  pub(crate) tempdir: Option<Utf8PathBuf>,
+  pub(crate) time: bool,
+  pub(crate) timestamp: bool,
+  pub(crate) timestamp_format: String,
   pub(crate) unsorted: bool,
   pub(crate) unstable: bool,
   pub(crate) verbosity: Verbosity,
-}
-
-mod cmd {
-  pub(crate) const CHANGELOG: &str = "CHANGELOG";
-  pub(crate) const CHOOSE: &str = "CHOOSE";
-  pub(crate) const COMMAND: &str = "COMMAND";
-  pub(crate) const COMPLETIONS: &str = "COMPLETIONS";
-  pub(crate) const DUMP: &str = "DUMP";
-  pub(crate) const EDIT: &str = "EDIT";
-  pub(crate) const EVALUATE: &str = "EVALUATE";
-  pub(crate) const FORMAT: &str = "FORMAT";
-  pub(crate) const INIT: &str = "INIT";
-  pub(crate) const LIST: &str = "LIST";
-  pub(crate) const SHOW: &str = "SHOW";
-  pub(crate) const SUMMARY: &str = "SUMMARY";
-  pub(crate) const VARIABLES: &str = "VARIABLES";
-
-  pub(crate) const ALL: &[&str] = &[
-    CHANGELOG,
-    CHOOSE,
-    COMMAND,
-    COMPLETIONS,
-    DUMP,
-    EDIT,
-    EVALUATE,
-    FORMAT,
-    INIT,
-    LIST,
-    SHOW,
-    SUMMARY,
-    VARIABLES,
-  ];
-
-  pub(crate) const ARGLESS: &[&str] = &[
-    CHANGELOG,
-    COMPLETIONS,
-    DUMP,
-    EDIT,
-    FORMAT,
-    INIT,
-    LIST,
-    SHOW,
-    SUMMARY,
-    VARIABLES,
-  ];
-}
-
-mod arg {
-  pub(crate) const ARGUMENTS: &str = "ARGUMENTS";
-  pub(crate) const CHECK: &str = "CHECK";
-  pub(crate) const CHOOSER: &str = "CHOOSER";
-  pub(crate) const CLEAR_SHELL_ARGS: &str = "CLEAR-SHELL-ARGS";
-  pub(crate) const COLOR: &str = "COLOR";
-  pub(crate) const DOTENV_FILENAME: &str = "DOTENV-FILENAME";
-  pub(crate) const DOTENV_PATH: &str = "DOTENV-PATH";
-  pub(crate) const DRY_RUN: &str = "DRY-RUN";
-  pub(crate) const DUMP_FORMAT: &str = "DUMP-FORMAT";
-  pub(crate) const HIGHLIGHT: &str = "HIGHLIGHT";
-  pub(crate) const JUSTFILE: &str = "JUSTFILE";
-  pub(crate) const LIST_HEADING: &str = "LIST-HEADING";
-  pub(crate) const LIST_PREFIX: &str = "LIST-PREFIX";
-  pub(crate) const NO_DOTENV: &str = "NO-DOTENV";
-  pub(crate) const NO_HIGHLIGHT: &str = "NO-HIGHLIGHT";
-  pub(crate) const QUIET: &str = "QUIET";
-  pub(crate) const SET: &str = "SET";
-  pub(crate) const SHELL: &str = "SHELL";
-  pub(crate) const SHELL_ARG: &str = "SHELL-ARG";
-  pub(crate) const SHELL_COMMAND: &str = "SHELL-COMMAND";
-  pub(crate) const UNSORTED: &str = "UNSORTED";
-  pub(crate) const UNSTABLE: &str = "UNSTABLE";
-  pub(crate) const VERBOSE: &str = "VERBOSE";
-  pub(crate) const WORKING_DIRECTORY: &str = "WORKING-DIRECTORY";
-
-  pub(crate) const COLOR_ALWAYS: &str = "always";
-  pub(crate) const COLOR_AUTO: &str = "auto";
-  pub(crate) const COLOR_NEVER: &str = "never";
-  pub(crate) const COLOR_VALUES: &[&str] = &[COLOR_AUTO, COLOR_ALWAYS, COLOR_NEVER];
-
-  pub(crate) const DUMP_FORMAT_JSON: &str = "json";
-  pub(crate) const DUMP_FORMAT_JUST: &str = "just";
-  pub(crate) const DUMP_FORMAT_VALUES: &[&str] = &[DUMP_FORMAT_JUST, DUMP_FORMAT_JSON];
+  pub(crate) yes: bool,
 }
 
 impl Config {
-  pub(crate) fn app() -> App<'static, 'static> {
-    let app = App::new(env!("CARGO_PKG_NAME"))
-      .help_message("Print help information")
-      .version_message("Print version information")
-      .setting(AppSettings::ColoredHelp)
-      .setting(AppSettings::TrailingVarArg)
-      .arg(
-        Arg::with_name(arg::CHECK)
-          .long("check")
-          .requires(cmd::FORMAT)
-          .help("Run `--fmt` in 'check' mode. Exits with 0 if justfile is formatted correctly. Exits with 1 and prints a diff if formatting is required."),
-      )
-      .arg(
-        Arg::with_name(arg::CHOOSER)
-          .long("chooser")
-          .takes_value(true)
-          .help("Override binary invoked by `--choose`"),
-      )
-      .arg(
-        Arg::with_name(arg::COLOR)
-          .long("color")
-          .takes_value(true)
-          .possible_values(arg::COLOR_VALUES)
-          .default_value(arg::COLOR_AUTO)
-          .help("Print colorful output"),
-      )
-      .arg(
-        Arg::with_name(arg::DRY_RUN)
-          .long("dry-run")
-          .help("Print what just would do without doing it")
-          .conflicts_with(arg::QUIET),
-      )
-      .arg(
-        Arg::with_name(arg::DUMP_FORMAT)
-          .long("dump-format")
-          .takes_value(true)
-          .possible_values(arg::DUMP_FORMAT_VALUES)
-          .default_value(arg::DUMP_FORMAT_JUST)
-          .value_name("FORMAT")
-          .help("Dump justfile as <FORMAT>"),
-      )
-      .arg(
-        Arg::with_name(arg::HIGHLIGHT)
-          .long("highlight")
-          .help("Highlight echoed recipe lines in bold")
-          .overrides_with(arg::NO_HIGHLIGHT),
-      )
-      .arg(
-        Arg::with_name(arg::LIST_HEADING)
-          .long("list-heading")
-          .help("Print <TEXT> before list")
-          .value_name("TEXT")
-          .takes_value(true),
-      )
-      .arg(
-        Arg::with_name(arg::LIST_PREFIX)
-          .long("list-prefix")
-          .help("Print <TEXT> before each list item")
-          .value_name("TEXT")
-          .takes_value(true),
-      )
-      .arg(
-        Arg::with_name(arg::NO_DOTENV)
-          .long("no-dotenv")
-          .help("Don't load `.env` file"),
-      )
-      .arg(
-        Arg::with_name(arg::NO_HIGHLIGHT)
-          .long("no-highlight")
-          .help("Don't highlight echoed recipe lines in bold")
-          .overrides_with(arg::HIGHLIGHT),
-      )
-      .arg(
-        Arg::with_name(arg::JUSTFILE)
-          .short("f")
-          .long("justfile")
-          .takes_value(true)
-          .help("Use <JUSTFILE> as justfile"),
-      )
-      .arg(
-        Arg::with_name(arg::QUIET)
-          .short("q")
-          .long("quiet")
-          .help("Suppress all output")
-          .conflicts_with(arg::DRY_RUN),
-      )
-      .arg(
-        Arg::with_name(arg::SET)
-          .long("set")
-          .takes_value(true)
-          .number_of_values(2)
-          .value_names(&["VARIABLE", "VALUE"])
-          .multiple(true)
-          .help("Override <VARIABLE> with <VALUE>"),
-      )
-      .arg(
-        Arg::with_name(arg::SHELL)
-          .long("shell")
-          .takes_value(true)
-          .default_value(DEFAULT_SHELL)
-          .help("Invoke <SHELL> to run recipes"),
-      )
-      .arg(
-        Arg::with_name(arg::SHELL_ARG)
-          .long("shell-arg")
-          .takes_value(true)
-          .multiple(true)
-          .number_of_values(1)
-          .default_value(DEFAULT_SHELL_ARG)
-          .allow_hyphen_values(true)
-          .overrides_with(arg::CLEAR_SHELL_ARGS)
-          .help("Invoke shell with <SHELL-ARG> as an argument"),
-      )
-      .arg(
-        Arg::with_name(arg::SHELL_COMMAND)
-          .long("shell-command")
-          .requires(cmd::COMMAND)
-          .help("Invoke <COMMAND> with the shell used to run recipe lines and backticks"),
-      )
-      .arg(
-        Arg::with_name(arg::CLEAR_SHELL_ARGS)
-          .long("clear-shell-args")
-          .overrides_with(arg::SHELL_ARG)
-          .help("Clear shell arguments"),
-      )
-      .arg(
-        Arg::with_name(arg::UNSORTED)
-          .long("unsorted")
-          .short("u")
-          .help("Return list and summary entries in source order"),
-      )
-      .arg(
-        Arg::with_name(arg::UNSTABLE)
-          .long("unstable")
-          .help("Enable unstable features"),
-      )
-      .arg(
-        Arg::with_name(arg::VERBOSE)
-          .short("v")
-          .long("verbose")
-          .multiple(true)
-          .help("Use verbose output"),
-      )
-      .arg(
-        Arg::with_name(arg::WORKING_DIRECTORY)
-          .short("d")
-          .long("working-directory")
-          .takes_value(true)
-          .help("Use <WORKING-DIRECTORY> as working directory. --justfile must also be set")
-          .requires(arg::JUSTFILE),
-      )
-      .arg(
-        Arg::with_name(cmd::CHANGELOG)
-          .long("changelog")
-          .help("Print changelog"),
-      )
-      .arg(Arg::with_name(cmd::CHOOSE).long("choose").help(CHOOSE_HELP))
-      .arg(
-        Arg::with_name(cmd::COMMAND)
-          .long("command")
-          .short("c")
-          .min_values(1)
-          .allow_hyphen_values(true)
-          .help(
-            "Run an arbitrary command with the working directory, `.env`, overrides, and exports \
-             set",
-          ),
-      )
-      .arg(
-        Arg::with_name(cmd::COMPLETIONS)
-          .long("completions")
-          .takes_value(true)
-          .value_name("SHELL")
-          .possible_values(&clap::Shell::variants())
-          .set(ArgSettings::CaseInsensitive)
-          .help("Print shell completion script for <SHELL>"),
-      )
-      .arg(
-        Arg::with_name(cmd::DUMP)
-          .long("dump")
-          .help("Print justfile"),
-      )
-      .arg(
-        Arg::with_name(cmd::EDIT)
-          .short("e")
-          .long("edit")
-          .help("Edit justfile with editor given by $VISUAL or $EDITOR, falling back to `vim`"),
-      )
-      .arg(Arg::with_name(cmd::EVALUATE).long("evaluate").help(
-        "Evaluate and print all variables. If a variable name is given as an argument, only print \
-         that variable's value.",
-      ))
-      .arg(
-        Arg::with_name(cmd::FORMAT)
-          .long("fmt")
-          .help("Format and overwrite justfile"),
-      )
-      .arg(
-        Arg::with_name(cmd::INIT)
-          .long("init")
-          .help("Initialize new justfile in project root"),
-      )
-      .arg(
-        Arg::with_name(cmd::LIST)
-          .short("l")
-          .long("list")
-          .help("List available recipes and their arguments"),
-      )
-      .arg(
-        Arg::with_name(cmd::SHOW)
-          .short("s")
-          .long("show")
-          .takes_value(true)
-          .value_name("RECIPE")
-          .help("Show information about <RECIPE>"),
-      )
-      .arg(
-        Arg::with_name(cmd::SUMMARY)
-          .long("summary")
-          .help("List names of available recipes"),
-      )
-      .arg(
-        Arg::with_name(cmd::VARIABLES)
-          .long("variables")
-          .help("List names of variables"),
-      )
-      .arg(
-        Arg::with_name(arg::DOTENV_FILENAME)
-          .long("dotenv-filename")
-          .takes_value(true)
-          .help("Search for environment file named <DOTENV-FILENAME> instead of `.env`")
-          .conflicts_with(arg::DOTENV_PATH),
-      )
-      .arg(
-        Arg::with_name(arg::DOTENV_PATH)
-          .long("dotenv-path")
-          .help("Load environment file at <DOTENV-PATH> instead of searching for one")
-          .takes_value(true),
-      )
-      .group(ArgGroup::with_name("SUBCOMMAND").args(cmd::ALL))
-      .arg(
-        Arg::with_name(arg::ARGUMENTS)
-          .multiple(true)
-          .help("Overrides and recipe(s) to run, defaulting to the first recipe in the justfile"),
-      );
-
-    if cfg!(feature = "help4help2man") {
-      app.version(env!("CARGO_PKG_VERSION")).about(concat!(
-        "- Please see ",
-        env!("CARGO_PKG_HOMEPAGE"),
-        " for more information."
-      ))
-    } else {
-      app
-        .version(env!("CARGO_PKG_VERSION"))
-        .author(env!("CARGO_PKG_AUTHORS"))
-        .about(concat!(
-          env!("CARGO_PKG_DESCRIPTION"),
-          " - ",
-          env!("CARGO_PKG_HOMEPAGE")
-        ))
-    }
-  }
-
-  fn color_from_matches(matches: &ArgMatches) -> ConfigResult<Color> {
-    let value = matches
-      .value_of(arg::COLOR)
-      .ok_or_else(|| ConfigError::Internal {
-        message: "`--color` had no value".to_string(),
-      })?;
-
-    match value {
-      arg::COLOR_AUTO => Ok(Color::auto()),
-      arg::COLOR_ALWAYS => Ok(Color::always()),
-      arg::COLOR_NEVER => Ok(Color::never()),
-      _ => Err(ConfigError::Internal {
-        message: format!("Invalid argument `{}` to --color.", value),
-      }),
-    }
-  }
-
-  fn dump_format_from_matches(matches: &ArgMatches) -> ConfigResult<DumpFormat> {
-    let value = matches
-      .value_of(arg::DUMP_FORMAT)
-      .ok_or_else(|| ConfigError::Internal {
-        message: "`--dump-format` had no value".to_string(),
-      })?;
-
-    match value {
-      arg::DUMP_FORMAT_JSON => Ok(DumpFormat::Json),
-      arg::DUMP_FORMAT_JUST => Ok(DumpFormat::Just),
-      _ => Err(ConfigError::Internal {
-        message: format!("Invalid argument `{}` to --dump-format.", value),
-      }),
-    }
-  }
-
-  pub(crate) fn from_matches(matches: &ArgMatches) -> ConfigResult<Self> {
-    let invocation_directory = env::current_dir().context(config_error::CurrentDir)?;
-
-    let verbosity = if matches.is_present(arg::QUIET) {
-      Verbosity::Quiet
-    } else {
-      Verbosity::from_flag_occurrences(matches.occurrences_of(arg::VERBOSE))
-    };
-
-    let color = Self::color_from_matches(matches)?;
-
-    let set_count = matches.occurrences_of(arg::SET);
-    let mut overrides = BTreeMap::new();
-    if set_count > 0 {
-      let mut values = matches.values_of(arg::SET).unwrap();
-      for _ in 0..set_count {
-        overrides.insert(
-          values.next().unwrap().to_owned(),
-          values.next().unwrap().to_owned(),
-        );
-      }
-    }
-
-    let positional = Positional::from_values(matches.values_of(arg::ARGUMENTS));
-
-    for (name, value) in positional.overrides {
-      overrides.insert(name.clone(), value.clone());
-    }
-
-    let search_config = {
-      let justfile = matches.value_of(arg::JUSTFILE).map(PathBuf::from);
-      let working_directory = matches.value_of(arg::WORKING_DIRECTORY).map(PathBuf::from);
-
-      if let Some(search_directory) = positional.search_directory.map(PathBuf::from) {
-        if justfile.is_some() || working_directory.is_some() {
-          return Err(ConfigError::SearchDirConflict);
-        }
-        SearchConfig::FromSearchDirectory { search_directory }
-      } else {
-        match (justfile, working_directory) {
-          (None, None) => SearchConfig::FromInvocationDirectory,
-          (Some(justfile), None) => SearchConfig::WithJustfile { justfile },
-          (Some(justfile), Some(working_directory)) => {
-            SearchConfig::WithJustfileAndWorkingDirectory {
-              justfile,
-              working_directory,
-            }
-          }
-          (None, Some(_)) => {
-            return Err(ConfigError::internal(
-              "--working-directory set without --justfile",
-            ))
-          }
-        }
-      }
-    };
-
-    for subcommand in cmd::ARGLESS {
-      if matches.is_present(subcommand) {
-        match (!overrides.is_empty(), !positional.arguments.is_empty()) {
-          (false, false) => {}
-          (true, false) => {
-            return Err(ConfigError::SubcommandOverrides {
-              subcommand,
-              overrides,
-            });
-          }
-          (false, true) => {
-            return Err(ConfigError::SubcommandArguments {
-              arguments: positional.arguments,
-              subcommand,
-            });
-          }
-          (true, true) => {
-            return Err(ConfigError::SubcommandOverridesAndArguments {
-              arguments: positional.arguments,
-              subcommand,
-              overrides,
-            });
-          }
-        }
-      }
-    }
-
-    let subcommand = if matches.is_present(cmd::CHANGELOG) {
-      Subcommand::Changelog
-    } else if matches.is_present(cmd::CHOOSE) {
-      Subcommand::Choose {
-        chooser: matches.value_of(arg::CHOOSER).map(str::to_owned),
-        overrides,
-      }
-    } else if let Some(values) = matches.values_of_os(cmd::COMMAND) {
-      let mut arguments = values.map(OsStr::to_owned).collect::<Vec<OsString>>();
-      Subcommand::Command {
-        binary: arguments.remove(0),
-        arguments,
-        overrides,
-      }
-    } else if let Some(shell) = matches.value_of(cmd::COMPLETIONS) {
-      Subcommand::Completions {
-        shell: shell.to_owned(),
-      }
-    } else if matches.is_present(cmd::EDIT) {
-      Subcommand::Edit
-    } else if matches.is_present(cmd::SUMMARY) {
-      Subcommand::Summary
-    } else if matches.is_present(cmd::DUMP) {
-      Subcommand::Dump
-    } else if matches.is_present(cmd::FORMAT) {
-      Subcommand::Format
-    } else if matches.is_present(cmd::INIT) {
-      Subcommand::Init
-    } else if matches.is_present(cmd::LIST) {
-      Subcommand::List
-    } else if let Some(name) = matches.value_of(cmd::SHOW) {
-      Subcommand::Show {
-        name: name.to_owned(),
-      }
-    } else if matches.is_present(cmd::EVALUATE) {
-      if positional.arguments.len() > 1 {
-        return Err(ConfigError::SubcommandArguments {
-          subcommand: cmd::EVALUATE,
-          arguments: positional
-            .arguments
-            .into_iter()
-            .skip(1)
-            .collect::<Vec<String>>(),
-        });
-      }
-
-      Subcommand::Evaluate {
-        variable: positional.arguments.into_iter().next(),
-        overrides,
-      }
-    } else if matches.is_present(cmd::VARIABLES) {
-      Subcommand::Variables
-    } else {
-      Subcommand::Run {
-        arguments: positional.arguments,
-        overrides,
-      }
-    };
-
-    let shell_args = if matches.is_present(arg::CLEAR_SHELL_ARGS) {
-      Vec::new()
-    } else {
-      matches
-        .values_of(arg::SHELL_ARG)
-        .unwrap()
-        .map(str::to_owned)
-        .collect()
-    };
-
-    let shell_present = matches.occurrences_of(arg::CLEAR_SHELL_ARGS) > 0
-      || matches.occurrences_of(arg::SHELL) > 0
-      || matches.occurrences_of(arg::SHELL_ARG) > 0;
-
+  pub(crate) fn new() -> ConfigResult<Self> {
     Ok(Self {
-      check: matches.is_present(arg::CHECK),
-      dry_run: matches.is_present(arg::DRY_RUN),
-      dump_format: Self::dump_format_from_matches(matches)?,
-      highlight: !matches.is_present(arg::NO_HIGHLIGHT),
-      shell: matches.value_of(arg::SHELL).unwrap().to_owned(),
-      load_dotenv: !matches.is_present(arg::NO_DOTENV),
-      shell_command: matches.is_present(arg::SHELL_COMMAND),
-      unsorted: matches.is_present(arg::UNSORTED),
-      unstable: matches.is_present(arg::UNSTABLE),
-      list_heading: matches
-        .value_of(arg::LIST_HEADING)
-        .unwrap_or("Available recipes:\n")
-        .to_owned(),
-      list_prefix: matches
-        .value_of(arg::LIST_PREFIX)
-        .unwrap_or("    ")
-        .to_owned(),
-      color,
-      invocation_directory,
-      search_config,
-      shell_args,
-      shell_present,
-      subcommand,
-      dotenv_filename: matches.value_of(arg::DOTENV_FILENAME).map(str::to_owned),
-      dotenv_path: matches.value_of(arg::DOTENV_PATH).map(PathBuf::from),
-      verbosity,
+      alias_style: AliasStyle::Right,
+      allow_missing: false,
+      ceiling: None,
+      check: false,
+      color: Color::default(),
+      command_color: None,
+      complete_aliases: false,
+      cygpath: Arguments::DEFAULT_CYGPATH.into(),
+      default_list: false,
+      dotenv_command: Vec::new(),
+      dotenv_filename: Vec::new(),
+      dotenv_path: Vec::new(),
+      dry_run: false,
+      explain: false,
+      global_fallback_justfile: None,
+      groups: Vec::new(),
+      highlight: true,
+      indentation: None,
+      invocation_directory: dir::current_directory()?,
+      jobs: None,
+      justfile_names: None,
+      list_heading: Arguments::DEFAULT_LIST_HEADING.into(),
+      list_prefix: Arguments::DEFAULT_LIST_PREFIX.into(),
+      list_submodules: false,
+      load_dotenv: true,
+      no_aliases: false,
+      no_cache: false,
+      no_dependencies: false,
+      one: false,
+      overrides: BTreeMap::new(),
+      search_config: SearchConfig::FromInvocationDirectory,
+      shell: None,
+      shell_args: None,
+      shell_command: false,
+      subcommand: Subcommand::Run {
+        arguments: Vec::new(),
+      },
+      tempdir: None,
+      time: false,
+      timestamp: false,
+      timestamp_format: Arguments::DEFAULT_TIMESTAMP_FORMAT.into(),
+      unsorted: false,
+      unstable: false,
+      verbosity: Verbosity::Taciturn,
+      yes: false,
     })
   }
 
-  pub(crate) fn require_unstable(&self, message: &str) -> Result<(), Error<'static>> {
-    if self.unstable {
-      Ok(())
+  fn parse_modulepath(values: &[String]) -> ConfigResult<Modulepath> {
+    let path = values.iter().map(String::as_str).collect::<Vec<&str>>();
+
+    let path = if path.len() == 1 && path[0].contains(' ') {
+      path[0].split_whitespace().collect::<Vec<&str>>()
     } else {
-      Err(Error::Unstable {
-        message: message.to_owned(),
+      path
+    };
+
+    path
+      .as_slice()
+      .try_into()
+      .map_err(|()| ConfigError::ModulePath {
+        path: values.to_vec(),
+      })
+  }
+
+  fn search_config(arguments: &Arguments, positional: &Positional) -> ConfigResult<SearchConfig> {
+    const STANDARD_INPUT_ARGUMENT: &str = "-";
+
+    let justfile = arguments.justfile.clone();
+
+    let working_directory = arguments.working_directory.clone();
+
+    if let Some(search_directory) = positional.search_directory.as_ref().map(Utf8PathBuf::from) {
+      if arguments.global_justfile || justfile.is_some() || working_directory.is_some() {
+        return Err(ConfigError::SearchDirConflict);
+      }
+      Ok(SearchConfig::FromSearchDirectory { search_directory })
+    } else if arguments.global_justfile {
+      Ok(SearchConfig::GlobalJustfile)
+    } else {
+      match (justfile, working_directory) {
+        (None, None) => Ok(SearchConfig::FromInvocationDirectory),
+        (Some(justfile), working_directory) => {
+          if justfile == Utf8Path::new(STANDARD_INPUT_ARGUMENT) {
+            Ok(SearchConfig::FromStandardInput { working_directory })
+          } else if let Some(working_directory) = working_directory {
+            Ok(SearchConfig::WithJustfileAndWorkingDirectory {
+              justfile,
+              working_directory,
+            })
+          } else {
+            Ok(SearchConfig::WithJustfile { justfile })
+          }
+        }
+        (None, Some(working_directory)) => {
+          Ok(SearchConfig::FromWorkingDirectory { working_directory })
+        }
+      }
+    }
+  }
+
+  fn parse_override(path: &str) -> ConfigResult<(Modulepath, String)> {
+    let mut path = Modulepath::try_from([path].as_slice())
+      .map_err(|()| ConfigError::OverridePath { path: path.into() })?;
+
+    let name = path.components.pop().unwrap();
+
+    Ok((path, name))
+  }
+
+  fn subcommand(arguments: &Arguments, positional: &Positional) -> ConfigResult<Subcommand> {
+    if arguments.subcommand.changelog {
+      Ok(Subcommand::Changelog)
+    } else if arguments.subcommand.choose {
+      Ok(Subcommand::Choose {
+        chooser: arguments.chooser.clone(),
+      })
+    } else if arguments.subcommand.clean.is_some() {
+      Ok(Subcommand::Clean {
+        path: if positional.arguments.is_empty() {
+          None
+        } else {
+          Some(Self::parse_modulepath(&positional.arguments)?)
+        },
+      })
+    } else if let Some(mut command) = arguments.subcommand.command.clone() {
+      Ok(Subcommand::Command {
+        binary: command.remove(0),
+        arguments: command,
+      })
+    } else if let Some(shell) = arguments.subcommand.completions {
+      Ok(Subcommand::Completions { shell })
+    } else if arguments.subcommand.dump {
+      Ok(Subcommand::Dump {
+        format: arguments.dump_format,
+      })
+    } else if arguments.subcommand.edit {
+      Ok(Subcommand::Edit)
+    } else if arguments.subcommand.evaluate {
+      let path = if positional.arguments.is_empty() {
+        Modulepath::default()
+      } else if positional.arguments.len() == 1 {
+        Self::parse_modulepath(&positional.arguments)?
+      } else {
+        return Err(ConfigError::SubcommandArguments {
+          subcommand: "EVALUATE",
+          arguments: positional.arguments.iter().skip(1).cloned().collect(),
+        });
+      };
+
+      Ok(Subcommand::Evaluate {
+        format: arguments.evaluate_format,
+        path,
+      })
+    } else if arguments.subcommand.fmt {
+      Ok(Subcommand::Format)
+    } else if arguments.subcommand.groups {
+      Ok(Subcommand::Groups)
+    } else if arguments.subcommand.init {
+      Ok(Subcommand::Init)
+    } else if arguments.subcommand.json {
+      Ok(Subcommand::Dump {
+        format: DumpFormat::Json,
+      })
+    } else if arguments.subcommand.list.is_some() {
+      Ok(Subcommand::List {
+        path: Self::parse_modulepath(&positional.arguments)?,
+      })
+    } else if arguments.subcommand.man {
+      Ok(Subcommand::Man)
+    } else if let Some(request) = arguments.subcommand.request.as_deref() {
+      Ok(Subcommand::Request {
+        request: serde_json::from_str(request).context(config_error::RequestParse)?,
+      })
+    } else if arguments.subcommand.show.is_some() {
+      Ok(Subcommand::Show {
+        path: Self::parse_modulepath(&positional.arguments)?,
+      })
+    } else if arguments.subcommand.summary {
+      Ok(Subcommand::Summary)
+    } else if arguments.subcommand.usage.is_some() {
+      Ok(Subcommand::Usage {
+        path: Self::parse_modulepath(&positional.arguments)?,
+      })
+    } else if arguments.subcommand.variables {
+      Ok(Subcommand::Variables)
+    } else {
+      Ok(Subcommand::Run {
+        arguments: positional.arguments.clone(),
       })
     }
   }
 
-  pub(crate) fn run<'src>(self, loader: &'src Loader) -> Result<(), Error<'src>> {
-    self.subcommand.run(&self, loader)
+  pub(crate) fn from_arguments(arguments: Arguments) -> ConfigResult<Self> {
+    let mut overrides = BTreeMap::new();
+    let mut values = arguments.set.iter();
+    while let Some(path) = values.next() {
+      overrides.insert(
+        Self::parse_override(path)?,
+        values
+          .next()
+          .ok_or_else(|| ConfigError::internal(format!("--set for `{path}` did not have value")))?
+          .into(),
+      );
+    }
+
+    let positional = Positional::from_values(
+      arguments
+        .subcommand
+        .list
+        .as_deref()
+        .or(arguments.subcommand.clean.as_deref())
+        .or(arguments.subcommand.show.as_deref())
+        .or(arguments.subcommand.usage.as_deref())
+        .unwrap_or(arguments.arguments.as_slice())
+        .iter()
+        .map(String::as_str),
+    );
+
+    for (path, value) in &positional.overrides {
+      overrides.insert(Self::parse_override(path)?, value.into());
+    }
+
+    let search_config = Self::search_config(&arguments, &positional)?;
+
+    let format_overrides = || {
+      overrides
+        .iter()
+        .map(|((path, key), value)| format!("{}={value}", path.join(key)))
+        .collect()
+    };
+
+    let subcommand = Self::subcommand(&arguments, &positional)?;
+
+    if !subcommand.takes_arguments() {
+      match (!overrides.is_empty(), !positional.arguments.is_empty()) {
+        (false, false) => {}
+        (true, false) => {
+          return Err(ConfigError::SubcommandOverrides {
+            subcommand: subcommand.name(),
+            overrides: format_overrides(),
+          });
+        }
+        (false, true) => {
+          return Err(ConfigError::SubcommandArguments {
+            arguments: positional.arguments,
+            subcommand: subcommand.name(),
+          });
+        }
+        (true, true) => {
+          return Err(ConfigError::SubcommandOverridesAndArguments {
+            arguments: positional.arguments,
+            subcommand: subcommand.name(),
+            overrides: format_overrides(),
+          });
+        }
+      }
+    }
+
+    let unstable = arguments.unstable || subcommand == Subcommand::Summary;
+
+    Ok(Self {
+      alias_style: arguments.alias_style,
+      allow_missing: arguments.allow_missing,
+      ceiling: arguments.ceiling,
+      check: arguments.check,
+      color: Color::new(arguments.indentation.unwrap_or_default(), arguments.color),
+      command_color: arguments.command_color.map(CommandColor::into),
+      complete_aliases: arguments.complete_aliases,
+      cygpath: arguments.cygpath,
+      default_list: arguments.default_list,
+      dotenv_command: arguments.dotenv_command,
+      dotenv_filename: arguments.dotenv_filename,
+      dotenv_path: arguments.dotenv_path,
+      dry_run: arguments.dry_run,
+      explain: arguments.explain,
+      global_fallback_justfile: arguments.global_fallback_justfile,
+      groups: arguments.group,
+      highlight: !arguments.no_highlight,
+      indentation: arguments.indentation,
+      invocation_directory: dir::current_directory()?,
+      jobs: arguments.jobs,
+      justfile_names: arguments.justfile_names,
+      list_heading: arguments.list_heading,
+      list_prefix: arguments.list_prefix,
+      list_submodules: arguments.list_submodules,
+      load_dotenv: !arguments.no_dotenv,
+      no_aliases: arguments.no_aliases,
+      no_cache: arguments.no_cache,
+      no_dependencies: arguments.no_deps,
+      one: arguments.one,
+      overrides,
+      search_config,
+      shell: arguments.shell,
+      shell_args: if arguments.clear_shell_args {
+        Some(Vec::new())
+      } else if arguments.shell_arg.is_empty() {
+        None
+      } else {
+        Some(arguments.shell_arg)
+      },
+      shell_command: arguments.shell_command,
+      subcommand,
+      tempdir: arguments.tempdir,
+      time: arguments.time,
+      timestamp: arguments.timestamp,
+      timestamp_format: arguments.timestamp_format,
+      unsorted: arguments.unsorted,
+      unstable,
+      verbosity: if arguments.quiet {
+        Verbosity::Quiet
+      } else {
+        Verbosity::from_flag_occurrences(arguments.verbose)
+      },
+      yes: arguments.yes,
+    })
+  }
+
+  pub(crate) fn command_color_stderr(&self) -> Color {
+    if self.highlight {
+      self.color.command(self.command_color)
+    } else {
+      self.color
+    }
+    .stderr()
+  }
+
+  pub(crate) fn require_unstable(
+    &self,
+    justfile: &Justfile,
+    unstable_feature: UnstableFeature,
+  ) -> RunResult<'static> {
+    if self.unstable || justfile.settings.unstable {
+      Ok(())
+    } else {
+      Err(Error::UnstableFeature { unstable_feature })
+    }
   }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::*;
-
-  use pretty_assertions::assert_eq;
-
-  // This test guards against unintended changes to the argument parser. We should
-  // have proper tests for all the flags, but this will do for now.
-  #[test]
-  fn help() {
-    const EXPECTED_HELP: &str = "just 0.10.4
-Casey Rodarmor <casey@rodarmor.com>
-🤖 Just a command runner \
-                                 - https://github.com/casey/just
-
-USAGE:
-    just [FLAGS] [OPTIONS] [--] [ARGUMENTS]...
-
-FLAGS:
-        --changelog           Print changelog
-        --check               Run `--fmt` in 'check' mode. Exits with 0 if
-                              justfile is formatted correctly. Exits with 1 and
-                              prints a diff if formatting is required.
-        --choose              Select one or more recipes to run using a binary.
-                              If `--chooser` is not passed the chooser defaults
-                              to the value of $JUST_CHOOSER, falling back to
-                              `fzf`
-        --clear-shell-args    Clear shell arguments
-        --dry-run             Print what just would do without doing it
-        --dump                Print justfile
-    -e, --edit                Edit justfile with editor given by $VISUAL or
-                              $EDITOR, falling back to `vim`
-        --evaluate            Evaluate and print all variables. If a variable
-                              name is given as an argument, only print that
-                              variable's value.
-        --fmt                 Format and overwrite justfile
-        --highlight           Highlight echoed recipe lines in bold
-        --init                Initialize new justfile in project root
-    -l, --list                List available recipes and their arguments
-        --no-dotenv           Don't load `.env` file
-        --no-highlight        Don't highlight echoed recipe lines in bold
-    -q, --quiet               Suppress all output
-        --shell-command       Invoke <COMMAND> with the shell used to run recipe
-                              lines and backticks
-        --summary             List names of available recipes
-    -u, --unsorted            Return list and summary entries in source order
-        --unstable            Enable unstable features
-        --variables           List names of variables
-    -v, --verbose             Use verbose output
-
-OPTIONS:
-        --chooser <CHOOSER>
-            Override binary invoked by `--choose`
-
-        --color <COLOR>
-            Print colorful output [default: auto]  [possible values: auto,
-            always, never]
-    -c, --command <COMMAND>
-            Run an arbitrary command with the working directory, `.env`,
-            overrides, and exports set
-        --completions <SHELL>
-            Print shell completion script for <SHELL> [possible values: zsh,
-            bash, fish, powershell, elvish]
-        --dotenv-filename <DOTENV-FILENAME>
-            Search for environment file named <DOTENV-FILENAME> instead of
-            `.env`
-        --dotenv-path <DOTENV-PATH>
-            Load environment file at <DOTENV-PATH> instead of searching for one
-
-        --dump-format <FORMAT>
-            Dump justfile as <FORMAT> [default: just]  [possible values: just,
-            json]
-    -f, --justfile <JUSTFILE>                      Use <JUSTFILE> as justfile
-        --list-heading <TEXT>                      Print <TEXT> before list
-        --list-prefix <TEXT>
-            Print <TEXT> before each list item
-
-        --set <VARIABLE> <VALUE>
-            Override <VARIABLE> with <VALUE>
-
-        --shell <SHELL>
-            Invoke <SHELL> to run recipes [default: sh]
-
-        --shell-arg <SHELL-ARG>...
-            Invoke shell with <SHELL-ARG> as an argument [default: -cu]
-
-    -s, --show <RECIPE>
-            Show information about <RECIPE>
-
-    -d, --working-directory <WORKING-DIRECTORY>
-            Use <WORKING-DIRECTORY> as working directory. --justfile must also
-            be set
-
-ARGS:
-    <ARGUMENTS>...    Overrides and recipe(s) to run, defaulting to the
-                      first recipe in the justfile";
-
-    let app = Config::app()
-      .setting(AppSettings::ColorNever)
-      .set_term_width(80);
-    let mut buffer = Vec::new();
-    app.write_help(&mut buffer).unwrap();
-    let help = str::from_utf8(&buffer).unwrap();
-
-    assert_eq!(help, EXPECTED_HELP);
-  }
+  use {
+    super::*,
+    clap::error::{ContextKind, ContextValue},
+    pretty_assertions::assert_eq,
+  };
 
   macro_rules! test {
     {
@@ -731,13 +405,17 @@ ARGS:
       $(color: $color:expr,)?
       $(dry_run: $dry_run:expr,)?
       $(dump_format: $dump_format:expr,)?
+      $(global_fallback_justfile: $global_fallback_justfile:expr,)?
       $(highlight: $highlight:expr,)?
+      $(no_cache: $no_cache:expr,)?
+      $(no_dependencies: $no_dependencies:expr,)?
+      $(overrides: $overrides:expr,)?
       $(search_config: $search_config:expr,)?
       $(shell: $shell:expr,)?
       $(shell_args: $shell_args:expr,)?
-      $(shell_present: $shell_present:expr,)?
       $(subcommand: $subcommand:expr,)?
       $(unsorted: $unsorted:expr,)?
+      $(unstable: $unstable:expr,)?
       $(verbosity: $verbosity:expr,)?
     } => {
       #[test]
@@ -751,13 +429,17 @@ ARGS:
           $(color: $color,)?
           $(dry_run: $dry_run,)?
           $(dump_format: $dump_format,)?
+          $(global_fallback_justfile: $global_fallback_justfile,)?
           $(highlight: $highlight,)?
+          $(no_cache: $no_cache,)?
+          $(no_dependencies: $no_dependencies,)?
+          $(overrides: $overrides,)?
           $(search_config: $search_config,)?
-          $(shell: $shell.to_owned(),)?
+          $(shell: $shell,)?
           $(shell_args: $shell_args,)?
-          $(shell_present: $shell_present,)?
           $(subcommand: $subcommand,)?
           $(unsorted: $unsorted,)?
+          $(unstable: $unstable,)?
           $(verbosity: $verbosity,)?
           ..testing::config(&[])
         };
@@ -767,12 +449,10 @@ ARGS:
     }
   }
 
+  #[track_caller]
   fn test(arguments: &[&str], want: Config) {
-    let app = Config::app();
-    let matches = app
-      .get_matches_from_safe(arguments)
-      .expect("agument parsing failed");
-    let have = Config::from_matches(&matches).expect("config parsing failed");
+    let arguments = Arguments::try_parse_from(arguments).expect("argument parsing failed");
+    let have = Config::from_arguments(arguments).expect("config parsing failed");
     assert_eq!(have, want);
   }
 
@@ -788,9 +468,7 @@ ARGS:
           $($arg,)*
         ];
 
-        let app = Config::app();
-
-        app.get_matches_from_safe(arguments).expect_err("Expected clap error");
+        Arguments::try_parse_from(arguments).expect_err("Expected clap error");
       }
     };
     {
@@ -806,16 +484,37 @@ ARGS:
           $($arg,)*
         ];
 
-        let app = Config::app();
+        let arguments =
+          Arguments::try_parse_from(arguments).expect("Matching fails");
 
-        let matches = app.get_matches_from_safe(arguments).expect("Matching failes");
-
-        match Config::from_matches(&matches).expect_err("config parsing succeeded") {
+        match Config::from_arguments(arguments).expect_err("config parsing succeeded") {
           $error => { $($check)? }
-          other => panic!("Unexpected config error: {}", other),
+          other => panic!("Unexpected config error: {other}"),
         }
       }
     }
+  }
+
+  macro_rules! error_matches {
+    (
+      name: $name:ident,
+      args: [$($arg:expr),*],
+      error: $error:pat,
+      $(check: $check:block,)?
+    ) => {
+      #[test]
+      fn $name() {
+        let arguments = &[
+          "just",
+          $($arg,)*
+        ];
+
+        match Arguments::try_parse_from(arguments) {
+          Err($error) => { $($check)? }
+          other => panic!("Unexpected result from get matches: {other:?}")
+        }
+      }
+    };
   }
 
   macro_rules! map {
@@ -826,9 +525,9 @@ ARGS:
       $($key:literal : $value:literal),* $(,)?
     } => {
       {
-        let mut map: BTreeMap<String, String> = BTreeMap::new();
+        let mut map: BTreeMap<(Modulepath, String), String> = BTreeMap::new();
         $(
-          map.insert($key.to_owned(), $value.to_owned());
+          map.insert((Modulepath::default(), $key.to_owned()), $value.to_owned());
         )*
         map
       }
@@ -876,8 +575,14 @@ ARGS:
   }
 
   test! {
-    name: dry_run_true,
+    name: dry_run_long,
     args: ["--dry-run"],
+    dry_run: true,
+  }
+
+  test! {
+    name: dry_run_short,
+    args: ["-n"],
     dry_run: true,
   }
 
@@ -923,6 +628,24 @@ ARGS:
   }
 
   test! {
+    name: no_cache,
+    args: ["--no-cache"],
+    no_cache: true,
+  }
+
+  test! {
+    name: no_deps,
+    args: ["--no-deps"],
+    no_dependencies: true,
+  }
+
+  test! {
+    name: no_dependencies,
+    args: ["--no-dependencies"],
+    no_dependencies: true,
+  }
+
+  test! {
     name: unsorted_default,
     args: [],
     unsorted: false,
@@ -963,48 +686,63 @@ ARGS:
     args: ["--dotenv-filename", "foo", "--dotenv-path", "bar"],
   }
 
+  error! {
+    name: dotenv_command_conflicts_with_filename,
+    args: ["--dotenv-command", "foo", "--dotenv-filename", "bar"],
+  }
+
+  error! {
+    name: dotenv_command_conflicts_with_path,
+    args: ["--dotenv-command", "foo", "--dotenv-path", "bar"],
+  }
+
+  error! {
+    name: dotenv_command_conflicts_with_no_dotenv,
+    args: ["--dotenv-command", "foo", "--no-dotenv"],
+  }
+
   test! {
     name: set_default,
     args: [],
+    overrides: map!(),
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!(),
     },
   }
 
   test! {
     name: set_one,
     args: ["--set", "foo", "bar"],
+    overrides: map!{"foo": "bar"},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "bar"},
     },
   }
 
   test! {
     name: set_empty,
     args: ["--set", "foo", ""],
+    overrides: map!{"foo": ""},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": ""},
     },
   }
 
   test! {
     name: set_two,
     args: ["--set", "foo", "bar", "--set", "bar", "baz"],
+    overrides: map!{"foo": "bar", "bar": "baz"},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "bar", "bar": "baz"},
     },
   }
 
   test! {
     name: set_override,
     args: ["--set", "foo", "bar", "--set", "foo", "baz"],
+    overrides: map!{"foo": "baz"},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "baz"},
     },
   }
 
@@ -1016,16 +754,21 @@ ARGS:
   test! {
     name: shell_default,
     args: [],
-    shell: "sh",
-    shell_args: vec!["-cu".to_owned()],
-    shell_present: false,
+    shell: None,
+    shell_args: None,
   }
 
   test! {
     name: shell_set,
     args: ["--shell", "tclsh"],
-    shell: "tclsh",
-    shell_present: true,
+    shell: Some("tclsh".to_owned()),
+  }
+
+  test! {
+    name: shell_args_set,
+    args: ["--shell-arg", "hello"],
+    shell: None,
+    shell_args: Some(vec!["hello".into()]),
   }
 
   test! {
@@ -1061,9 +804,9 @@ ARGS:
   test! {
     name: subcommand_default,
     args: [],
+    overrides: map!{},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{},
     },
   }
 
@@ -1120,13 +863,13 @@ ARGS:
   test! {
     name: subcommand_completions,
     args: ["--completions", "bash"],
-    subcommand: Subcommand::Completions{shell: "bash".to_owned()},
+    subcommand: Subcommand::Completions{ shell: Shell::Bash },
   }
 
   test! {
     name: subcommand_completions_uppercase,
     args: ["--completions", "BASH"],
-    subcommand: Subcommand::Completions{shell: "BASH".to_owned()},
+    subcommand: Subcommand::Completions{ shell: Shell::Bash },
   }
 
   error! {
@@ -1137,13 +880,13 @@ ARGS:
   test! {
     name: subcommand_dump,
     args: ["--dump"],
-    subcommand: Subcommand::Dump,
+    subcommand: Subcommand::Dump { format: DumpFormat::Just },
   }
 
   test! {
-    name: dump_format,
-    args: ["--dump-format", "json"],
-    dump_format: DumpFormat::Json,
+    name: subcommand_json,
+    args: ["--json"],
+    subcommand: Subcommand::Dump { format: DumpFormat::Json },
   }
 
   test! {
@@ -1155,163 +898,191 @@ ARGS:
   test! {
     name: subcommand_evaluate,
     args: ["--evaluate"],
+    overrides: map!{},
     subcommand: Subcommand::Evaluate {
-      overrides: map!{},
-      variable: None,
+      format: EvaluateFormat::Just,
+      path: Modulepath::default(),
     },
   }
 
   test! {
     name: subcommand_evaluate_overrides,
     args: ["--evaluate", "x=y"],
+    overrides: map!{"x": "y"},
     subcommand: Subcommand::Evaluate {
-      overrides: map!{"x": "y"},
-      variable: None,
+      format: EvaluateFormat::Just,
+      path: Modulepath::default(),
     },
   }
 
   test! {
     name: subcommand_evaluate_overrides_with_argument,
     args: ["--evaluate", "x=y", "foo"],
+    overrides: map!{"x": "y"},
     subcommand: Subcommand::Evaluate {
-      overrides: map!{"x": "y"},
-      variable: Some("foo".to_owned()),
+      format: EvaluateFormat::Just,
+      path: Modulepath::try_from(["foo"].as_slice()).unwrap(),
     },
   }
 
   test! {
     name: subcommand_list_long,
     args: ["--list"],
-    subcommand: Subcommand::List,
+    subcommand: Subcommand::List { path: Modulepath::default() },
   }
 
   test! {
     name: subcommand_list_short,
     args: ["-l"],
-    subcommand: Subcommand::List,
+    subcommand: Subcommand::List { path: Modulepath::default() },
+  }
+
+  test! {
+    name: subcommand_list_arguments,
+    args: ["--list", "bar"],
+    subcommand: Subcommand::List { path: Modulepath::try_from(["bar"].as_slice()).unwrap() },
   }
 
   test! {
     name: subcommand_show_long,
     args: ["--show", "build"],
-    subcommand: Subcommand::Show { name: String::from("build") },
+    subcommand: Subcommand::Show { path: Modulepath::try_from(["build"].as_slice()).unwrap() },
   }
 
   test! {
     name: subcommand_show_short,
     args: ["-s", "build"],
-    subcommand: Subcommand::Show { name: String::from("build") },
+    subcommand: Subcommand::Show { path: Modulepath::try_from(["build"].as_slice()).unwrap() },
   }
 
-  error! {
-    name: subcommand_show_no_arg,
-    args: ["--show"],
+  test! {
+    name: subcommand_show_multiple_args,
+    args: ["--show", "foo", "bar"],
+    subcommand: Subcommand::Show {
+      path: Modulepath::try_from(["foo", "bar"].as_slice()).unwrap(),
+    },
+  }
+
+  test! {
+    name: subcommand_list_search_directory,
+    args: ["--list", ".."],
+    search_config: SearchConfig::FromSearchDirectory {
+      search_directory: Utf8PathBuf::from(".."),
+    },
+    subcommand: Subcommand::List { path: Modulepath::default() },
+  }
+
+  test! {
+    name: subcommand_show_search_directory,
+    args: ["--show", "../foo"],
+    search_config: SearchConfig::FromSearchDirectory {
+      search_directory: Utf8PathBuf::from("../"),
+    },
+    subcommand: Subcommand::Show { path: Modulepath::try_from(["foo"].as_slice()).unwrap() },
+  }
+
+  test! {
+    name: subcommand_usage_search_directory,
+    args: ["--usage", "foo/bar"],
+    search_config: SearchConfig::FromSearchDirectory {
+      search_directory: Utf8PathBuf::from("foo/"),
+    },
+    subcommand: Subcommand::Usage { path: Modulepath::try_from(["bar"].as_slice()).unwrap() },
   }
 
   test! {
     name: subcommand_summary,
     args: ["--summary"],
     subcommand: Subcommand::Summary,
+    unstable: true,
   }
 
   test! {
     name: arguments,
     args: ["foo", "bar"],
+    overrides: map!{},
     subcommand: Subcommand::Run {
       arguments: vec![String::from("foo"), String::from("bar")],
-      overrides: map!{},
-    },
-  }
-
-  test! {
-    name: arguments_leading_equals,
-    args: ["=foo"],
-    subcommand: Subcommand::Run {
-      arguments: vec!["=foo".to_owned()],
-      overrides: map!{},
     },
   }
 
   test! {
     name: overrides,
     args: ["foo=bar", "bar=baz"],
+    overrides: map!{"foo": "bar", "bar": "baz"},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "bar", "bar": "baz"},
     },
   }
 
   test! {
     name: overrides_empty,
     args: ["foo=", "bar="],
+    overrides: map!{"foo": "", "bar": ""},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "", "bar": ""},
     },
   }
 
   test! {
     name: overrides_override_sets,
     args: ["--set", "foo", "0", "--set", "bar", "1", "foo=bar", "bar=baz"],
+    overrides: map!{"foo": "bar", "bar": "baz"},
     subcommand: Subcommand::Run {
       arguments: Vec::new(),
-      overrides: map!{"foo": "bar", "bar": "baz"},
     },
   }
 
   test! {
     name: shell_args_default,
     args: [],
-    shell_args: vec!["-cu".to_owned()],
   }
 
   test! {
     name: shell_args_set_hyphen,
     args: ["--shell-arg", "--foo"],
-    shell_args: vec!["--foo".to_owned()],
-    shell_present: true,
+    shell_args: Some(vec!["--foo".to_owned()]),
   }
 
   test! {
     name: shell_args_set_word,
     args: ["--shell-arg", "foo"],
-    shell_args: vec!["foo".to_owned()],
-    shell_present: true,
+    shell_args: Some(vec!["foo".to_owned()]),
   }
 
   test! {
     name: shell_args_set_multiple,
     args: ["--shell-arg", "foo", "--shell-arg", "bar"],
-    shell_args: vec!["foo".to_owned(), "bar".to_owned()],
-    shell_present: true,
+    shell_args: Some(vec!["foo".to_owned(), "bar".to_owned()]),
+
   }
 
   test! {
     name: shell_args_clear,
     args: ["--clear-shell-args"],
-    shell_args: vec![],
-    shell_present: true,
+    shell_args: Some(Vec::new()),
+
   }
 
   test! {
     name: shell_args_clear_and_set,
     args: ["--clear-shell-args", "--shell-arg", "bar"],
-    shell_args: vec!["bar".to_owned()],
-    shell_present: true,
+    shell_args: Some(vec!["bar".to_owned()]),
+
   }
 
   test! {
     name: shell_args_set_and_clear,
     args: ["--shell-arg", "bar", "--clear-shell-args"],
-    shell_args: vec![],
-    shell_present: true,
+    shell_args: Some(Vec::new()),
+
   }
 
   test! {
     name: shell_args_set_multiple_and_clear,
     args: ["--shell-arg", "bar", "--shell-arg", "baz", "--clear-shell-args"],
-    shell_args: vec![],
-    shell_present: true,
+    shell_args: Some(Vec::new()),
+
   }
 
   test! {
@@ -1321,11 +1092,25 @@ ARGS:
   }
 
   test! {
+    name: global_fallback_justfile,
+    args: ["--global-fallback-justfile", "foo"],
+    global_fallback_justfile: Some(Utf8PathBuf::from("foo")),
+  }
+
+  test! {
     name: search_config_from_working_directory_and_justfile,
     args: ["--working-directory", "foo", "--justfile", "bar"],
     search_config: SearchConfig::WithJustfileAndWorkingDirectory {
-      justfile: PathBuf::from("bar"),
-      working_directory: PathBuf::from("foo"),
+      justfile: Utf8PathBuf::from("bar"),
+      working_directory: Utf8PathBuf::from("foo"),
+    },
+  }
+
+  test! {
+    name: search_config_from_working_directory,
+    args: ["--working-directory", "foo"],
+    search_config: SearchConfig::FromWorkingDirectory {
+      working_directory: Utf8PathBuf::from("foo"),
     },
   }
 
@@ -1333,7 +1118,7 @@ ARGS:
     name: search_config_justfile_long,
     args: ["--justfile", "foo"],
     search_config: SearchConfig::WithJustfile {
-      justfile: PathBuf::from("foo"),
+      justfile: Utf8PathBuf::from("foo"),
     },
   }
 
@@ -1341,7 +1126,27 @@ ARGS:
     name: search_config_justfile_short,
     args: ["-f", "foo"],
     search_config: SearchConfig::WithJustfile {
-      justfile: PathBuf::from("foo"),
+      justfile: Utf8PathBuf::from("foo"),
+    },
+  }
+
+  test! {
+    name: search_config_justfile_stdin_long,
+    args: ["--justfile", "-"],
+    search_config: SearchConfig::FromStandardInput { working_directory: None },
+  }
+
+  test! {
+    name: search_config_justfile_stdin_short,
+    args: ["-f", "-"],
+    search_config: SearchConfig::FromStandardInput { working_directory: None },
+  }
+
+  test! {
+    name: search_config_justfile_stdin_with_working_directory,
+    args: ["--justfile", "-", "--working-directory", "foo"],
+    search_config: SearchConfig::FromStandardInput {
+      working_directory: Some(Utf8PathBuf::from("foo")),
     },
   }
 
@@ -1349,7 +1154,7 @@ ARGS:
     name: search_directory_parent,
     args: ["../"],
     search_config: SearchConfig::FromSearchDirectory {
-      search_directory: PathBuf::from(".."),
+      search_directory: Utf8PathBuf::from(".."),
     },
   }
 
@@ -1357,16 +1162,16 @@ ARGS:
     name: search_directory_parent_with_recipe,
     args: ["../build"],
     search_config: SearchConfig::FromSearchDirectory {
-      search_directory: PathBuf::from(".."),
+      search_directory: Utf8PathBuf::from(".."),
     },
-    subcommand: Subcommand::Run { arguments: vec!["build".to_owned()], overrides: BTreeMap::new() },
+    subcommand: Subcommand::Run { arguments: vec!["build".to_owned()] },
   }
 
   test! {
     name: search_directory_child,
     args: ["foo/"],
     search_config: SearchConfig::FromSearchDirectory {
-      search_directory: PathBuf::from("foo"),
+      search_directory: Utf8PathBuf::from("foo"),
     },
   }
 
@@ -1374,7 +1179,7 @@ ARGS:
     name: search_directory_deep,
     args: ["foo/bar/"],
     search_config: SearchConfig::FromSearchDirectory {
-      search_directory: PathBuf::from("foo/bar"),
+      search_directory: Utf8PathBuf::from("foo/bar"),
     },
   }
 
@@ -1382,9 +1187,9 @@ ARGS:
     name: search_directory_child_with_recipe,
     args: ["foo/build"],
     search_config: SearchConfig::FromSearchDirectory {
-      search_directory: PathBuf::from("foo"),
+      search_directory: Utf8PathBuf::from("foo"),
     },
-    subcommand: Subcommand::Run { arguments: vec!["build".to_owned()], overrides: BTreeMap::new() },
+    subcommand: Subcommand::Run { arguments: vec!["build".to_owned()] },
   }
 
   error! {
@@ -1399,13 +1204,32 @@ ARGS:
     error: ConfigError::SearchDirConflict,
   }
 
-  error! {
-    name: completions_arguments,
-    args: ["--completions", "zsh", "foo"],
-    error: ConfigError::SubcommandArguments { subcommand, arguments },
+  error_matches! {
+    name: completions_argument,
+    args: ["--completions", "foo"],
+    error: error,
     check: {
-      assert_eq!(subcommand, cmd::COMPLETIONS);
-      assert_eq!(arguments, &["foo"]);
+      assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+      assert_eq!(error.context().collect::<Vec<_>>(), vec![
+        (
+          ContextKind::InvalidArg,
+          &ContextValue::String("--completions <SHELL>".into())),
+        (
+          ContextKind::InvalidValue,
+          &ContextValue::String("foo".into()),
+        ),
+        (
+          ContextKind::ValidValue,
+          &ContextValue::Strings([
+            "bash".into(),
+            "elvish".into(),
+            "fish".into(),
+            "nushell".into(),
+            "powershell".into(),
+            "zsh".into()].into()
+          ),
+        ),
+      ]);
     },
   }
 
@@ -1414,17 +1238,7 @@ ARGS:
     args: ["--changelog", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::CHANGELOG);
-      assert_eq!(arguments, &["bar"]);
-    },
-  }
-
-  error! {
-    name: list_arguments,
-    args: ["--list", "bar"],
-    error: ConfigError::SubcommandArguments { subcommand, arguments },
-    check: {
-      assert_eq!(subcommand, cmd::LIST);
+      assert_eq!(subcommand, "CHANGELOG");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1434,7 +1248,7 @@ ARGS:
     args: ["--dump", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::DUMP);
+      assert_eq!(subcommand, "DUMP");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1444,7 +1258,7 @@ ARGS:
     args: ["--edit", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::EDIT);
+      assert_eq!(subcommand, "EDIT");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1454,7 +1268,17 @@ ARGS:
     args: ["--fmt", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::FORMAT);
+      assert_eq!(subcommand, "FORMAT");
+      assert_eq!(arguments, &["bar"]);
+    },
+  }
+
+  error! {
+    name: fmt_alias,
+    args: ["--format", "bar"],
+    error: ConfigError::SubcommandArguments { subcommand, arguments },
+    check: {
+      assert_eq!(subcommand, "FORMAT");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1464,17 +1288,17 @@ ARGS:
     args: ["--init", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::INIT);
+      assert_eq!(subcommand, "INIT");
       assert_eq!(arguments, &["bar"]);
     },
   }
 
   error! {
-    name: show_arguments,
-    args: ["--show", "foo", "bar"],
+    name: init_alias,
+    args: ["--initialize", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::SHOW);
+      assert_eq!(subcommand, "INIT");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1484,7 +1308,7 @@ ARGS:
     args: ["--summary", "bar"],
     error: ConfigError::SubcommandArguments { subcommand, arguments },
     check: {
-      assert_eq!(subcommand, cmd::SUMMARY);
+      assert_eq!(subcommand, "SUMMARY");
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1494,8 +1318,8 @@ ARGS:
     args: ["--summary", "bar=baz", "bar"],
     error: ConfigError::SubcommandOverridesAndArguments { subcommand, arguments, overrides },
     check: {
-      assert_eq!(subcommand, cmd::SUMMARY);
-      assert_eq!(overrides, map!{"bar": "baz"});
+      assert_eq!(subcommand, "SUMMARY");
+      assert_eq!(overrides, vec!["bar=baz"]);
       assert_eq!(arguments, &["bar"]);
     },
   }
@@ -1505,8 +1329,16 @@ ARGS:
     args: ["--summary", "bar=baz"],
     error: ConfigError::SubcommandOverrides { subcommand, overrides },
     check: {
-      assert_eq!(subcommand, cmd::SUMMARY);
-      assert_eq!(overrides, map!{"bar": "baz"});
+      assert_eq!(subcommand, "SUMMARY");
+      assert_eq!(overrides, vec!["bar=baz"]);
     },
+  }
+
+  #[test]
+  fn default_config_matches_parsed_config() {
+    assert_eq!(
+      Config::new().unwrap(),
+      Config::from_arguments(Arguments::try_parse_from(["just"]).unwrap()).unwrap()
+    );
   }
 }

@@ -1,62 +1,119 @@
-use crate::common::*;
+use super::*;
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct CompileError<'src> {
+  pub(crate) kind: Box<CompileErrorKind<'src>>,
   pub(crate) token: Token<'src>,
-  pub(crate) kind: CompileErrorKind<'src>,
 }
 
 impl<'src> CompileError<'src> {
   pub(crate) fn context(&self) -> Token<'src> {
     self.token
   }
+
+  pub(crate) fn new(token: Token<'src>, kind: CompileErrorKind<'src>) -> Self {
+    Self {
+      token,
+      kind: kind.into(),
+    }
+  }
+
+  pub(crate) fn source(&self) -> Option<&dyn std::error::Error> {
+    match &*self.kind {
+      CompileErrorKind::ArgumentPatternRegex { source } => Some(source),
+      _ => None,
+    }
+  }
 }
 
 impl Display for CompileError<'_> {
-  fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
+  fn fmt(&self, f: &mut Formatter) -> fmt::Result {
     use CompileErrorKind::*;
 
-    match &self.kind {
-      AliasShadowsRecipe { alias, recipe_line } => {
+    match &*self.kind {
+      ArgAttributeMinExceedsMax { min, max } => {
+        write!(f, "argument attribute `min` `{min}` exceeds `max` `{max}`")
+      }
+      ArgAttributeRequiresMultipleOrVariadic { key } => {
         write!(
           f,
-          "Alias `{}` defined on line {} shadows recipe `{}` defined on line {}",
-          alias,
-          self.token.line.ordinal(),
-          alias,
-          recipe_line.ordinal(),
-        )?;
+          "argument attribute `{key}` only valid with `multiple` or a variadic parameter"
+        )
       }
-      BacktickShebang => {
-        write!(f, "Backticks may not start with `#!`")?;
+      ArgAttributeRequiresOption { key } => {
+        write!(
+          f,
+          "argument attribute `{key}` only valid with `long` or `short`"
+        )
       }
-      CircularRecipeDependency { recipe, ref circle } => {
-        if circle.len() == 2 {
-          write!(f, "Recipe `{}` depends on itself", recipe)?;
-        } else {
-          write!(
-            f,
-            "Recipe `{}` has circular dependency `{}`",
-            recipe,
-            circle.join(" -> ")
-          )?;
-        }
+      ArgumentCountParse { key, value, source } => {
+        write!(f, "invalid `{key}` value `{value}`: {source}")
       }
-      CircularVariableDependency {
-        variable,
-        ref circle,
+      ArgumentCountValue { key, value } => {
+        write!(f, "invalid `{key}` value `{value}`")
+      }
+      ArgumentPatternRegex { .. } => {
+        write!(f, "failed to parse argument pattern")
+      }
+      AttributeArgumentCountMismatch {
+        attribute,
+        found,
+        min,
+        max,
       } => {
+        write!(
+          f,
+          "attribute `{attribute}` got {} but takes ",
+          Count::numbered("argument", found),
+        )?;
+
+        if min == max {
+          write!(f, "{}", Count::numbered("argument", min))
+        } else if found < min {
+          write!(f, "at least {}", Count::numbered("argument", min))
+        } else {
+          write!(f, "at most {}", Count::numbered("argument", max))
+        }
+      }
+      AttributeArgumentExpression { attribute } => {
+        write!(
+          f,
+          "attribute `{attribute}` arguments must be string literals"
+        )
+      }
+      AttributeKeyTakesNoValue { key } => {
+        write!(f, "attribute key `{key}` takes no value")
+      }
+      AttributePositionalFollowsKeyword => {
+        write!(
+          f,
+          "positional attribute arguments cannot follow keyword attribute arguments"
+        )
+      }
+      BacktickShebang => write!(f, "backticks may not start with `#!`"),
+      CircularRecipeDependency { recipe, circle } => {
         if circle.len() == 2 {
-          write!(f, "Variable `{}` is defined in terms of itself", variable)?;
+          write!(f, "recipe `{recipe}` depends on itself")
         } else {
           write!(
             f,
-            "Variable `{}` depends on its own value: `{}`",
-            variable,
+            "recipe `{recipe}` has circular dependency `{}`",
             circle.join(" -> ")
-          )?;
+          )
         }
       }
+      CircularVariableDependency { variable, circle } => {
+        if circle.len() == 2 {
+          write!(f, "variable `{variable}` is defined in terms of itself")
+        } else {
+          write!(
+            f,
+            "variable `{variable}` depends on its own value: `{}`",
+            circle.join(" -> "),
+          )
+        }
+      }
+      ConstEval(error) => write!(f, "{error}"),
       DependencyArgumentCountMismatch {
         dependency,
         found,
@@ -65,197 +122,367 @@ impl Display for CompileError<'_> {
       } => {
         write!(
           f,
-          "Dependency `{}` got {} {} but takes ",
-          dependency,
-          found,
-          Count("argument", *found),
+          "dependency `{dependency}` got {} but takes ",
+          Count::numbered("argument", found),
         )?;
 
         if min == max {
-          let expected = min;
-          write!(f, "{} {}", expected, Count("argument", *expected))?;
+          write!(f, "{}", Count::numbered("argument", min))
         } else if found < min {
-          write!(f, "at least {} {}", min, Count("argument", *min))?;
+          write!(f, "at least {}", Count::numbered("argument", min))
         } else {
-          write!(f, "at most {} {}", max, Count("argument", *max))?;
+          write!(f, "at most {}", Count::numbered("argument", max))
         }
       }
-      DuplicateAlias { alias, first } => {
-        write!(
-          f,
-          "Alias `{}` first defined on line {} is redefined on line {}",
-          alias,
-          first.ordinal(),
-          self.token.line.ordinal(),
-        )?;
-      }
-      DuplicateParameter { recipe, parameter } => {
-        write!(
-          f,
-          "Recipe `{}` has duplicate parameter `{}`",
-          recipe, parameter
-        )?;
-      }
-      DuplicateRecipe { recipe, first } => {
-        write!(
-          f,
-          "Recipe `{}` first defined on line {} is redefined on line {}",
-          recipe,
-          first.ordinal(),
-          self.token.line.ordinal()
-        )?;
-      }
-      DuplicateSet { setting, first } => {
-        write!(
-          f,
-          "Setting `{}` first set on line {} is redefined on line {}",
-          setting,
-          first.ordinal(),
-          self.token.line.ordinal(),
-        )?;
-      }
-      DuplicateVariable { variable } => {
-        write!(f, "Variable `{}` has multiple definitions", variable)?;
-      }
-      ExpectedKeyword { expected, found } => write!(
+      DuplicateArgAttribute { arg, first } => write!(
         f,
-        "Expected keyword {} but found identifier `{}`",
-        List::or_ticked(expected),
-        found
-      )?,
-      ExtraLeadingWhitespace => {
-        write!(f, "Recipe line has extra leading whitespace")?;
+        "attribute for argument `{arg}` first used on line {} is duplicated on line {}",
+        first.ordinal(),
+        self.token.line.ordinal(),
+      ),
+      DuplicateAttribute { attribute, first } => write!(
+        f,
+        "attribute `{attribute}` first used on line {} is duplicated on line {}",
+        first.ordinal(),
+        self.token.line.ordinal(),
+      ),
+      DuplicateAttributeKey { attribute, key } => {
+        write!(f, "duplicate key `{key}` for `{attribute}` attribute")
       }
-      FunctionArgumentCountMismatch {
+      DuplicateDefault { recipe } => write!(
+        f,
+        "recipe `{recipe}` has duplicate `[default]` attribute, which may only appear once per module",
+      ),
+      DuplicateFunctionParameter {
         function,
-        found,
-        expected,
+        parameter,
       } => {
         write!(
           f,
-          "Function `{}` called with {} {} but takes {}",
-          function,
-          found,
-          Count("argument", *found),
-          expected.display(),
-        )?;
+          "function `{function}` has duplicate parameter `{parameter}`"
+        )
       }
-      InconsistentLeadingWhitespace { expected, found } => {
+      DuplicateGroupAttribute { group, first } => write!(
+        f,
+        "`[group({group})]` attribute first used on line {} is duplicated on line {}",
+        first.ordinal(),
+        self.token.line.ordinal(),
+      ),
+      DuplicateOption { recipe, option } => {
         write!(
           f,
-          "Recipe line has inconsistent leading whitespace. Recipe started with `{}` but found \
-           line with `{}`",
-          ShowWhitespace(expected),
-          ShowWhitespace(found)
-        )?;
+          "recipe `{recipe}` defines option `{option}` multiple times"
+        )
       }
-      Internal { ref message } => {
+      DuplicateParameter { recipe, parameter } => {
+        write!(f, "recipe `{recipe}` has duplicate parameter `{parameter}`")
+      }
+      DuplicateSet { setting, first } => write!(
+        f,
+        "setting `{setting}` first set on line {} is redefined on line {}",
+        first.ordinal(),
+        self.token.line.ordinal(),
+      ),
+      DuplicateVariable { variable } => {
+        write!(f, "variable `{variable}` has multiple definitions")
+      }
+      DuplicateUnexport { variable } => {
+        write!(f, "variable `{variable}` is unexported multiple times")
+      }
+      EscapeEndOfFile => {
+        write!(f, "expected escape sequence but found end-of-file")
+      }
+      ExitMessageAndNoExitMessageAttribute { recipe } => write!(
+        f,
+        "recipe `{recipe}` has both `[exit-message]` and `[no-exit-message]` attributes"
+      ),
+      ExpectedKeyword { expected, found } => {
+        let expected = List::or_ticked(expected);
+        if found.kind == TokenKind::Identifier {
+          write!(
+            f,
+            "expected keyword {expected} but found identifier `{}`",
+            found.lexeme()
+          )
+        } else {
+          write!(f, "expected keyword {expected} but found `{}`", found.kind)
+        }
+      }
+      ExportUnexported { variable } => {
+        write!(f, "variable {variable} is both exported and unexported")
+      }
+      ExtraLeadingWhitespace => write!(f, "recipe line has extra leading whitespace"),
+      ExtraneousAttributes { count } => {
+        write!(f, "extraneous {}", Count::unnumbered("attribute", count))
+      }
+      FlagAndPatternArgAttribute { parameter } => {
         write!(
           f,
-          "Internal error, this may indicate a bug in just: {}\n\
-           consider filing an issue: https://github.com/casey/just/issues/new",
-          message
-        )?;
+          "argument `{parameter}` may not have both `flag` and `pattern` attributes"
+        )
       }
-      InvalidEscapeSequence { character } => {
-        let representation = match character {
-          '`' => r"\`".to_owned(),
-          '\\' => r"\".to_owned(),
-          '\'' => r"'".to_owned(),
-          '"' => r#"""#.to_owned(),
+      FlagAndValueArgAttribute { parameter } => {
+        write!(
+          f,
+          "argument `{parameter}` may not have both `flag` and `value` attributes"
+        )
+      }
+      FlagAttributeTakesNoValue { parameter } => {
+        write!(
+          f,
+          "`flag` attribute for argument `{parameter}` takes no value"
+        )
+      }
+      FlagWithDefault { parameter } => {
+        write!(f, "flag parameter `{parameter}` may not have a default")
+      }
+      FunctionArgumentCountMismatch {
+        function,
+        arguments,
+        expected,
+      } => write!(
+        f,
+        "function `{function}` called with {} but takes {}",
+        Count::numbered("argument", arguments),
+        expected.display(),
+      ),
+      GuardAndInfallibleSigil => write!(
+        f,
+        "the guard `?` and infallible `-` sigils may not be used together"
+      ),
+      IncompatibleSettings {
+        first,
+        first_line,
+        second,
+      } => write!(
+        f,
+        "`{}` set on line {} is incompatible with `{}`",
+        first.lexeme(),
+        first_line.ordinal(),
+        second.lexeme()
+      ),
+      InconsistentLeadingWhitespace { expected, found } => write!(
+        f,
+        "recipe line has inconsistent leading whitespace, started with `{}` but found line with \
+          `{}`",
+        ShowWhitespace(expected),
+        ShowWhitespace(found)
+      ),
+      Internal { message } => write!(
+        f,
+        "internal error, this may indicate a bug in just: {message}\n\
+           consider filing an issue: https://github.com/casey/just/issues/new"
+      ),
+      InvalidAttribute {
+        item_name,
+        item_kind,
+        attribute,
+      } => write!(
+        f,
+        "{item_kind} `{item_name}` has invalid attribute `{}`",
+        attribute.name(),
+      ),
+      InvalidDryRun { value } => write!(
+        f,
+        "invalid `dry-run` setting `{value}`: expected {}",
+        List::or_ticked(DryRun::iter()),
+      ),
+      InvalidEscapeSequence { character } => write!(
+        f,
+        "`\\{}` is not a valid escape sequence",
+        match character {
+          '`' => "\\`".to_owned(),
+          '\\' => "\\".to_owned(),
+          '\'' => "'".to_owned(),
+          '"' => "\"".to_owned(),
           _ => character.escape_default().collect(),
-        };
-        write!(f, "`\\{}` is not a valid escape sequence", representation)?;
+        }
+      ),
+      InvalidShellRecipeAttribute { attribute, recipe } => write!(
+        f,
+        "shell recipe `{recipe}` has script recipe attribute `{}`",
+        attribute.name(),
+      ),
+      InvalidIndentation { message } => {
+        write!(f, "{message}")
       }
+      InvalidMinimumVersion { source, version } => {
+        write!(
+          f,
+          "`minimum-version` setting has invalid version `{version}`: {source}"
+        )
+      }
+      InvalidSignal { signal } => write!(
+        f,
+        "invalid signal `{signal}`: expected `SIGHUP`, `SIGINT`, or `SIGQUIT`"
+      ),
+      ListFeature(feature) => write!(f, "{feature}"),
+      MappedDependencyMultipleStarredArguments => {
+        write!(
+          f,
+          "mapped dependencies may not have multiple starred arguments"
+        )
+      }
+      MappedDependencyWithoutListsSetting => {
+        write!(f, "mapped dependencies require `set lists`")
+      }
+      MappedDependencyWithoutStarredArgument => {
+        write!(f, "mapped dependencies must have starred argument")
+      }
+      MinimumVersion { current, minimum } => write!(
+        f,
+        "justfile requires just {minimum} or later, but using {current}",
+      ),
       MismatchedClosingDelimiter {
         open,
         open_line,
         close,
-      } => {
-        write!(
-          f,
-          "Mismatched closing delimiter `{}`. (Did you mean to close the `{}` on line {}?)",
-          close.close(),
-          open.open(),
-          open_line.ordinal(),
-        )?;
-      }
-      MixedLeadingWhitespace { whitespace } => {
-        write!(
-          f,
-          "Found a mix of tabs and spaces in leading whitespace: `{}`\nLeading whitespace may \
+      } => write!(
+        f,
+        "mismatched closing delimiter `{}`, did you mean to close the `{}` on line {}?",
+        close.close(),
+        open.open(),
+        open_line.ordinal(),
+      ),
+      MixedLeadingWhitespace { whitespace } => write!(
+        f,
+        "found a mix of tabs and spaces in leading whitespace: `{}`\nleading whitespace may \
            consist of tabs or spaces, but not both",
-          ShowWhitespace(whitespace)
-        )?;
+        ShowWhitespace(whitespace)
+      ),
+      NoCdAndWorkingDirectoryAttribute { recipe } => write!(
+        f,
+        "recipe `{recipe}` has both `[no-cd]` and `[working-directory]` attributes"
+      ),
+      OptionNameContainsEqualSign { parameter } => {
+        write!(
+          f,
+          "option name for parameter `{parameter}` contains equal sign"
+        )
+      }
+      OptionNameEmpty { parameter } => {
+        write!(f, "option name for parameter `{parameter}` is empty")
+      }
+      OptionNameStartsWithDash { parameter } => {
+        write!(
+          f,
+          "option name for parameter `{parameter}` starts with dash"
+        )
       }
       ParameterFollowsVariadicParameter { parameter } => {
-        write!(f, "Parameter `{}` follows variadic parameter", parameter)?;
+        write!(f, "parameter `{parameter}` follows variadic parameter")
       }
-      ParameterShadowsVariable { parameter } => {
+      ParsingRecursionDepthExceeded => write!(f, "parsing recursion depth exceeded"),
+      Redefinition {
+        first,
+        first_type,
+        name,
+        second_type,
+      } => {
+        if first_type == second_type {
+          write!(
+            f,
+            "{first_type} `{name}` first defined on line {} is redefined on line {}",
+            first.ordinal(),
+            self.token.line.ordinal(),
+          )
+        } else {
+          write!(
+            f,
+            "{first_type} `{name}` defined on line {} is redefined as {} {second_type} on line {}",
+            first.ordinal(),
+            second_type.article(),
+            self.token.line.ordinal(),
+          )
+        }
+      }
+      ScriptAndShellAttribute { recipe } => write!(
+        f,
+        "recipe `{recipe}` has both `[script]` and `[shell]` attributes"
+      ),
+      SettingExpression { setting } => {
+        write!(f, "`{setting}` setting must be a plain string literal")
+      }
+      ShellExpansion { err } => write!(f, "shell expansion failed: {err}"),
+      ShortOptionWithMultipleCharacters { parameter } => {
         write!(
           f,
-          "Parameter `{}` shadows variable of the same name",
-          parameter
-        )?;
+          "short option name for parameter `{parameter}` contains multiple characters"
+        )
       }
-      RequiredParameterFollowsDefaultParameter { parameter } => {
-        write!(
-          f,
-          "Non-default parameter `{}` follows default parameter",
-          parameter
-        )?;
+      StarredArgumentOutsideMappedDependency => write!(
+        f,
+        "starred arguments may not be used outside mapped dependencies",
+      ),
+      RequiredParameterFollowsDefaultParameter { parameter } => write!(
+        f,
+        "non-default parameter `{parameter}` follows default parameter"
+      ),
+      UndefinedArgAttribute { argument } => {
+        write!(f, "argument attribute for undefined argument `{argument}`")
       }
-      UndefinedVariable { variable } => {
-        write!(f, "Variable `{}` not defined", variable)?;
-      }
+      UndefinedFunction { function } => write!(f, "call to undefined function `{function}`"),
+      UndefinedVariable { variable } => write!(f, "variable `{variable}` not defined"),
       UnexpectedCharacter { expected } => {
-        write!(f, "Expected character `{}`", expected)?;
+        write!(f, "expected character {}", List::or_ticked(expected))
       }
       UnexpectedClosingDelimiter { close } => {
-        write!(f, "Unexpected closing delimiter `{}`", close.close())?;
+        write!(f, "unexpected closing delimiter `{}`", close.close())
       }
       UnexpectedEndOfToken { expected } => {
-        write!(f, "Expected character `{}` but found end-of-file", expected)?;
-      }
-      UnexpectedToken {
-        ref expected,
-        found,
-      } => {
-        write!(f, "Expected {}, but found {}", List::or(expected), found)?;
-      }
-      UnknownAliasTarget { alias, target } => {
-        write!(f, "Alias `{}` has an unknown target `{}`", alias, target)?;
-      }
-      UnknownDependency { recipe, unknown } => {
         write!(
           f,
-          "Recipe `{}` has unknown dependency `{}`",
-          recipe, unknown
-        )?;
+          "expected character {} but found end-of-file",
+          List::or_ticked(expected),
+        )
       }
-      UnknownFunction { function } => {
-        write!(f, "Call to unknown function `{}`", function)?;
+      UnexpectedToken { expected, found } => {
+        write!(f, "expected {}, but found {found}", List::or(expected))
       }
-      UnknownSetting { setting } => {
-        write!(f, "Unknown setting `{}`", setting)?;
+      UnicodeEscapeCharacter { character } => {
+        write!(f, "expected hex digit [0-9A-Fa-f] but found `{character}`")
       }
-      UnknownStartOfToken => {
-        write!(f, "Unknown start of token:")?;
+      UnicodeEscapeDelimiter { character } => write!(
+        f,
+        "expected unicode escape sequence delimiter `{{` but found `{character}`"
+      ),
+      UnicodeEscapeEmpty => write!(f, "unicode escape sequences must not be empty"),
+      UnicodeEscapeLength { hex } => write!(
+        f,
+        "unicode escape sequence starting with `\\u{{{hex}` longer than six hex digits"
+      ),
+      UnicodeEscapeRange { hex } => {
+        write!(
+          f,
+          "unicode escape sequence value `{hex}` greater than maximum valid code point `10FFFF`",
+        )
       }
-      UnpairedCarriageReturn => {
-        write!(f, "Unpaired carriage return")?;
+      UnicodeEscapeUnterminated => write!(f, "unterminated unicode escape sequence"),
+      UnknownAliasTarget { alias, target } => {
+        write!(f, "alias `{alias}` has an unknown target `{target}`")
       }
-      UnterminatedBacktick => {
-        write!(f, "Unterminated backtick")?;
+      AttributeKeyMissingValue { key } => {
+        write!(f, "attribute key `{key}` requires value")
       }
-      UnterminatedInterpolation => {
-        write!(f, "Unterminated interpolation")?;
+      UnknownAttributeKey { attribute, key } => {
+        write!(f, "unknown key `{key}` for `{attribute}` attribute")
       }
-      UnterminatedString => {
-        write!(f, "Unterminated string")?;
+      UnknownAttribute { attribute } => write!(f, "unknown attribute `{attribute}`"),
+      UnknownDependency { recipe, unknown } => {
+        write!(f, "recipe `{recipe}` has unknown dependency `{unknown}`")
       }
+      UnknownSetting { setting } => write!(f, "unknown setting `{setting}`"),
+      UnknownStartOfToken { start } => {
+        write!(f, "unknown start of token '{start}'")?;
+        if !start.is_ascii_graphic() {
+          write!(f, " (U+{:04X})", *start as u32)?;
+        }
+        Ok(())
+      }
+      UnpairedCarriageReturn => write!(f, "unpaired carriage return"),
+      UnterminatedBacktick => write!(f, "unterminated backtick"),
+      UnterminatedInterpolation => write!(f, "unterminated interpolation"),
+      UnterminatedString => write!(f, "unterminated string"),
     }
-
-    Ok(())
   }
 }

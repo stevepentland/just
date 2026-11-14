@@ -1,25 +1,16 @@
-// `Self` cannot be used where type takes generic arguments
-#![allow(clippy::use_self)]
+use super::*;
 
-use crate::common::*;
-
-pub struct Enclosure<T: Display> {
-  enclosure: &'static str,
-  value: T,
-}
+pub(crate) struct Enclosure<T: Display>(T);
 
 impl<T: Display> Enclosure<T> {
-  pub fn tick(value: T) -> Enclosure<T> {
-    Self {
-      enclosure: "`",
-      value,
-    }
+  pub(crate) fn tick(value: T) -> Self {
+    Self(value)
   }
 }
 
 impl<T: Display> Display for Enclosure<T> {
   fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-    write!(f, "{}{}{}", self.enclosure, self.value, self.enclosure)
+    write!(f, "`{}`", self.0)
   }
 }
 

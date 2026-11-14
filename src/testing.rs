@@ -1,24 +1,16 @@
-use crate::common::*;
+use {super::*, pretty_assertions::assert_eq};
 
-use crate::compiler::Compiler;
-use pretty_assertions::assert_eq;
-
-pub(crate) fn compile(text: &str) -> Justfile {
-  match Compiler::compile(text) {
-    Ok(justfile) => justfile,
-    Err(error) => panic!("Expected successful compilation but got error:\n {}", error),
-  }
+pub(crate) fn compile(src: &str) -> Justfile {
+  Compiler::test_compile(src).expect("expected successful compilation")
 }
 
 pub(crate) fn config(args: &[&str]) -> Config {
   let mut args = Vec::from(args);
   args.insert(0, "just");
 
-  let app = Config::app();
+  let arguments = Arguments::try_parse_from(args).unwrap();
 
-  let matches = app.get_matches_from_safe(args).unwrap();
-
-  Config::from_matches(&matches).unwrap()
+  Config::from_arguments(arguments).unwrap()
 }
 
 pub(crate) fn search(config: &Config) -> Search {
@@ -26,7 +18,9 @@ pub(crate) fn search(config: &Config) -> Search {
   let justfile = working_directory.join("justfile");
 
   Search {
+    global_fallback_used: false,
     justfile,
+    tempdir: None,
     working_directory,
   }
 }
@@ -63,25 +57,46 @@ pub(crate) fn analysis_error(
   length: usize,
   kind: CompileErrorKind,
 ) {
-  let tokens = Lexer::lex(src).expect("Lexing failed in parse test...");
+  let lex = Lexer::test_lex(src).expect("Lexing failed in parse test...");
 
-  let ast = Parser::parse(&tokens).expect("Parsing failed in analysis test...");
+  let ast =
+    Parser::parse_lex(&lex, &mut Numerator::new()).expect("Parsing failed in analysis test...");
 
-  match Analyzer::analyze(ast) {
+  let root = Utf8PathBuf::from("justfile");
+  let mut asts: HashMap<(Modulepath, Utf8PathBuf), Ast> = HashMap::new();
+  asts.insert((Modulepath::default(), root.clone()), ast);
+
+  let mut paths: HashMap<Utf8PathBuf, Utf8PathBuf> = HashMap::new();
+  paths.insert("justfile".into(), "justfile".into());
+
+  match Analyzer::analyze(
+    &asts,
+    &Config::new().unwrap(),
+    None,
+    &[],
+    &[],
+    &Modulepath::default(),
+    None,
+    &mut HashMap::new(),
+    &paths,
+    false,
+    &root,
+  ) {
     Ok(_) => panic!("Analysis unexpectedly succeeded"),
-    Err(have) => {
+    Err(compile_error) => {
       let want = CompileError {
         token: Token {
-          kind: have.token.kind,
+          kind: compile_error.token.kind,
           src,
           offset,
           line,
           column,
           length,
+          path: "justfile".as_ref(),
         },
-        kind,
+        kind: kind.into(),
       };
-      assert_eq!(have, want);
+      assert_eq!(compile_error, want);
     }
   }
 }
@@ -99,18 +114,17 @@ macro_rules! run_error {
       let config = $crate::testing::config(&$args);
       let search = $crate::testing::search(&config);
 
-      if let Subcommand::Run{ overrides, arguments } = &config.subcommand {
-        match $crate::compiler::Compiler::compile(&$crate::unindent::unindent($src))
-          .expect("Expected successful compilation")
+      if let Subcommand::Run{ arguments } = &config.subcommand {
+        match $crate::testing::compile(&$crate::unindent::unindent($src))
           .run(
             &config,
             &search,
-            &overrides,
             &arguments,
+            &HashMap::new(),
           ).expect_err("Expected runtime error") {
             $error => $check
             other => {
-              panic!("Unexpected run error: {:?}", other);
+              panic!("Unexpected run error: {other:?}");
             }
           }
       } else {
@@ -121,7 +135,7 @@ macro_rules! run_error {
 }
 
 macro_rules! assert_matches {
-  ($expression:expr, $( $pattern:pat )|+ $( if $guard:expr )?) => {
+  ($expression:expr, $( $pattern:pat_param )|+ $( if $guard:expr )? $(,)?) => {
     match $expression {
       $( $pattern )|+ $( if $guard )? => {}
       left => panic!(

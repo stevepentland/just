@@ -1,98 +1,64 @@
-use crate::common::*;
+use {
+  super::*,
+  nu_ansi_term::{
+    AnsiGenericString,
+    Color::{Blue, Cyan, Green, Purple, Red, Yellow},
+    Prefix, Style, Suffix,
+  },
+  std::io::{self, IsTerminal},
+};
 
-use ansi_term::{ANSIGenericString, Color::*, Prefix, Style, Suffix};
-use atty::Stream;
-
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Color {
-  use_color: UseColor,
-  atty: bool,
+  indentation: Indentation,
+  is_terminal: bool,
   style: Style,
+  use_color: UseColor,
 }
 
 impl Color {
-  fn restyle(self, style: Style) -> Self {
-    Self { style, ..self }
-  }
-
-  fn redirect(self, stream: Stream) -> Self {
-    Self {
-      atty: atty::is(stream),
-      ..self
+  pub(crate) fn active(&self) -> bool {
+    match self.use_color {
+      UseColor::Always => true,
+      UseColor::Never => false,
+      UseColor::Auto => self.is_terminal,
     }
   }
 
-  fn effective_style(&self) -> Style {
-    if self.active() {
-      self.style
-    } else {
-      Style::new()
-    }
+  pub(crate) fn alias(self) -> Self {
+    self.restyle(Style::new().fg(Purple))
   }
 
-  pub(crate) fn auto() -> Self {
-    Self {
-      use_color: UseColor::Auto,
-      ..Color::default()
-    }
-  }
-
+  #[cfg(test)]
   pub(crate) fn always() -> Self {
     Self {
       use_color: UseColor::Always,
-      ..Color::default()
+      ..Self::default()
     }
-  }
-
-  pub(crate) fn never() -> Self {
-    Self {
-      use_color: UseColor::Never,
-      ..Color::default()
-    }
-  }
-
-  pub(crate) fn stderr(self) -> Self {
-    self.redirect(Stream::Stderr)
-  }
-
-  pub(crate) fn stdout(self) -> Self {
-    self.redirect(Stream::Stdout)
-  }
-
-  pub(crate) fn doc(self) -> Self {
-    self.restyle(Style::new().fg(Blue))
-  }
-
-  pub(crate) fn error(self) -> Self {
-    self.restyle(Style::new().fg(Red).bold())
-  }
-
-  pub(crate) fn warning(self) -> Self {
-    self.restyle(Style::new().fg(Yellow).bold())
-  }
-
-  pub(crate) fn banner(self) -> Self {
-    self.restyle(Style::new().fg(Cyan).bold())
-  }
-
-  pub(crate) fn command(self) -> Self {
-    self.restyle(Style::new().bold())
-  }
-
-  pub(crate) fn parameter(self) -> Self {
-    self.restyle(Style::new().fg(Cyan))
-  }
-
-  pub(crate) fn message(self) -> Self {
-    self.restyle(Style::new().bold())
   }
 
   pub(crate) fn annotation(self) -> Self {
     self.restyle(Style::new().fg(Purple))
   }
 
-  pub(crate) fn string(self) -> Self {
-    self.restyle(Style::new().fg(Green))
+  pub(crate) fn auto() -> Self {
+    Self::default()
+  }
+
+  pub(crate) fn banner(self) -> Self {
+    self.restyle(Style::new().fg(Cyan).bold())
+  }
+
+  pub(crate) fn command(self, foreground: Option<nu_ansi_term::Color>) -> Self {
+    self.restyle(Style {
+      foreground,
+      is_bold: true,
+      ..Style::default()
+    })
+  }
+
+  pub(crate) fn context(self) -> Self {
+    self.restyle(Style::new().fg(Blue).bold())
   }
 
   pub(crate) fn diff_added(self) -> Self {
@@ -103,33 +69,120 @@ impl Color {
     self.restyle(Style::new().fg(Red))
   }
 
-  pub(crate) fn active(&self) -> bool {
-    match self.use_color {
-      UseColor::Always => true,
-      UseColor::Never => false,
-      UseColor::Auto => self.atty,
+  pub(crate) fn doc(self) -> Self {
+    self.restyle(Style::new().fg(Blue))
+  }
+
+  pub(crate) fn doc_backtick(self) -> Self {
+    self.restyle(Style::new().fg(Cyan))
+  }
+
+  fn effective_style(&self) -> Style {
+    if self.active() {
+      self.style
+    } else {
+      Style::new()
     }
   }
 
-  pub(crate) fn paint<'a>(&self, text: &'a str) -> ANSIGenericString<'a, str> {
+  pub(crate) fn error(self) -> Self {
+    self.restyle(Style::new().fg(Red).bold())
+  }
+
+  pub(crate) fn group(self) -> Self {
+    self.restyle(Style::new().fg(Yellow).bold())
+  }
+
+  pub(crate) fn indentation(self) -> Indentation {
+    self.indentation
+  }
+
+  pub(crate) fn message(self) -> Self {
+    self.restyle(Style::new().bold())
+  }
+
+  pub(crate) fn never() -> Self {
+    Self {
+      use_color: UseColor::Never,
+      ..Self::default()
+    }
+  }
+
+  pub(crate) fn paint<'a>(&self, text: &'a str) -> AnsiGenericString<'a, str> {
     self.effective_style().paint(text)
+  }
+
+  pub(crate) fn parameter(self) -> Self {
+    self.restyle(Style::new().fg(Cyan))
   }
 
   pub(crate) fn prefix(&self) -> Prefix {
     self.effective_style().prefix()
   }
 
+  fn redirect(self, stream: impl IsTerminal) -> Self {
+    Self {
+      is_terminal: stream.is_terminal(),
+      ..self
+    }
+  }
+
+  fn restyle(self, style: Style) -> Self {
+    Self { style, ..self }
+  }
+
+  pub(crate) fn stderr(self) -> Self {
+    self.redirect(io::stderr())
+  }
+
+  pub(crate) fn stdout(self) -> Self {
+    self.redirect(io::stdout())
+  }
+
+  pub(crate) fn string(self) -> Self {
+    self.restyle(Style::new().fg(Green))
+  }
+
+  pub(crate) fn string_escape(self) -> Self {
+    self.restyle(Style::new().fg(Cyan))
+  }
+
   pub(crate) fn suffix(&self) -> Suffix {
     self.effective_style().suffix()
   }
-}
 
-impl Default for Color {
-  fn default() -> Self {
+  pub(crate) fn warning(self) -> Self {
+    self.restyle(Style::new().fg(Yellow).bold())
+  }
+
+  pub(crate) fn heading(self) -> Self {
+    self.restyle(Style::new().fg(Yellow).bold())
+  }
+
+  pub(crate) fn option(self) -> Self {
+    self.restyle(Style::new().fg(Green))
+  }
+
+  pub(crate) fn argument(self) -> Self {
+    self.restyle(Style::new().fg(Cyan))
+  }
+
+  pub(crate) fn new(indentation: Indentation, use_color: UseColor) -> Self {
     Self {
-      use_color: UseColor::Auto,
-      atty: false,
-      style: Style::new(),
+      indentation,
+      use_color,
+      ..Default::default()
+    }
+  }
+
+  pub(crate) fn with_use_color(self, use_color: UseColor) -> Self {
+    Self { use_color, ..self }
+  }
+
+  pub(crate) fn with_indentation(self, indentation: Indentation) -> Self {
+    Self {
+      indentation,
+      ..self
     }
   }
 }

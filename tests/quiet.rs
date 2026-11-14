@@ -1,137 +1,273 @@
-use crate::common::*;
+use super::*;
 
-test! {
-  name:     no_stdout,
-  justfile: r#"
-default:
-  @echo hello
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
+#[test]
+fn no_stdout() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        default:
+          @echo hello
+      ",
+    )
+    .success();
 }
 
-test! {
-  name:     stderr,
-  justfile: r#"
-default:
-  @echo hello 1>&2
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
+#[test]
+fn stderr() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        default:
+          @echo hello 1>&2
+      ",
+    )
+    .success();
 }
 
-test! {
-  name:     command_echoing,
-  justfile: r#"
-default:
-  exit
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
+#[test]
+fn command_echoing() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        default:
+          exit
+      ",
+    )
+    .success();
 }
 
-test! {
-  name:     error_messages,
-  justfile: r#"
-default:
-  exit 100
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
-  status:   100,
+#[test]
+fn error_messages() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        default:
+          exit 100
+      ",
+    )
+    .status(100);
 }
 
-test! {
-  name:     assignment_backtick_stderr,
-  justfile: r#"
-a := `echo hello 1>&2`
-default:
-  exit 100
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
-  status:   100,
+#[test]
+fn assignment_backtick_stderr() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        a := `echo hello 1>&2`
+        default:
+          exit 100
+      ",
+    )
+    .status(100);
 }
 
-test! {
-  name:     interpolation_backtick_stderr,
-  justfile: r#"
-default:
-  echo `echo hello 1>&2`
-  exit 100
-"#,
-  args:     ("--quiet"),
-  stdout:   "",
-  status:   100,
+#[test]
+fn interpolation_backtick_stderr() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        default:
+          echo `echo hello 1>&2`
+          exit 100
+      ",
+    )
+    .status(100);
 }
 
-test! {
-  name: choose_none,
-  justfile: "",
-  args: ("--choose", "--quiet"),
-  status: EXIT_FAILURE,
+#[test]
+fn choose_none() {
+  Test::new()
+    .arg("--choose")
+    .arg("--quiet")
+    .justfile("")
+    .failure();
 }
 
-test! {
-  name: choose_invocation,
-  justfile: "foo:",
-  args: ("--choose", "--quiet", "--shell", "asdfasdfasfdasdfasdfadsf"),
-  status: EXIT_FAILURE,
-  shell: false,
+#[test]
+fn choose_invocation() {
+  Test::new()
+    .arg("--choose")
+    .arg("--quiet")
+    .arg("--shell")
+    .arg("asdfasdfasfdasdfasdfadsf")
+    .justfile("foo:")
+    .shell(false)
+    .failure();
 }
 
-test! {
-  name: choose_status,
-  justfile: "foo:",
-  args: ("--choose", "--quiet", "--chooser", "/usr/bin/env false"),
-  status: EXIT_FAILURE,
+#[test]
+fn choose_status() {
+  Test::new()
+    .arg("--choose")
+    .arg("--quiet")
+    .arg("--chooser")
+    .arg("/usr/bin/env false")
+    .justfile("foo:")
+    .failure();
 }
 
-test! {
-  name: edit_invocation,
-  justfile: "foo:",
-  args: ("--edit", "--quiet"),
-  env: {
-    "VISUAL": "adsfasdfasdfadsfadfsaf",
-  },
-  status: EXIT_FAILURE,
+#[test]
+fn edit_invocation() {
+  Test::new()
+    .arg("--edit")
+    .arg("--quiet")
+    .env("VISUAL", "adsfasdfasdfadsfadfsaf")
+    .justfile("foo:")
+    .failure();
 }
 
-test! {
-  name: edit_status,
-  justfile: "foo:",
-  args: ("--edit", "--quiet"),
-  env: {
-    "VISUAL": "false",
-  },
-  status: EXIT_FAILURE,
+#[test]
+fn edit_status() {
+  Test::new()
+    .arg("--edit")
+    .arg("--quiet")
+    .env("VISUAL", "false")
+    .justfile("foo:")
+    .failure();
 }
 
-test! {
-  name: init_exists,
-  justfile: "foo:",
-  args: ("--init", "--quiet"),
-  status: EXIT_FAILURE,
+#[test]
+fn init_exists() {
+  Test::new()
+    .arg("--init")
+    .arg("--quiet")
+    .justfile("foo:")
+    .failure();
 }
 
-test! {
-  name: show_missing,
-  justfile: "foo:",
-  args: ("--show", "bar", "--quiet"),
-  status: EXIT_FAILURE,
+#[test]
+fn show_missing() {
+  Test::new()
+    .arg("--show")
+    .arg("bar")
+    .arg("--quiet")
+    .justfile("foo:")
+    .failure();
 }
 
-test! {
-  name: summary_none,
-  justfile: "",
-  args: ("--summary", "--quiet"),
+#[test]
+fn quiet_shebang() {
+  Test::new()
+    .arg("--quiet")
+    .justfile(
+      "
+        @foo:
+          #!/bin/sh
+      ",
+    )
+    .success();
 }
 
-test! {
-  name: quiet_shebang,
-  justfile: "
-    @foo:
-      #!/bin/sh
-  ",
-  args: ("--quiet"),
+#[test]
+fn no_quiet_setting() {
+  Test::new()
+    .justfile(
+      "
+        foo:
+          echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .stderr("echo FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        foo:
+          echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting_with_no_quiet_attribute() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        [no-quiet]
+        foo:
+          echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .stderr("echo FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting_with_quiet_recipe() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        @foo:
+          echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting_with_quiet_line() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        foo:
+          @echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting_with_no_quiet_attribute_and_quiet_recipe() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        [no-quiet]
+        @foo:
+          echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .success();
+}
+
+#[test]
+fn quiet_setting_with_no_quiet_attribute_and_quiet_line() {
+  Test::new()
+    .justfile(
+      "
+        set quiet
+
+        [no-quiet]
+        foo:
+          @echo FOO
+      ",
+    )
+    .stdout("FOO\n")
+    .success();
 }

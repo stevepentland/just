@@ -1,59 +1,98 @@
 [package]
 name = "just"
-version = "0.10.4"
-description = "🤖 Just a command runner"
+version = "1.59.0"
 authors = ["Casey Rodarmor <casey@rodarmor.com>"]
-license = "CC0-1.0"
-homepage = "https://github.com/casey/just"
-repository = "https://github.com/casey/just"
-readme = "crates-io-readme.md"
-edition = "2018"
 autotests = false
 categories = ["command-line-utilities", "development-tools"]
+description = "🤖 Just a command runner"
+edition = "2024"
+exclude = ["/book", "/etc", "!/etc/completion-registration-script.bash", "/www"]
+homepage = "https://just.systems"
 keywords = ["command-line", "task", "runner", "development", "utility"]
+license = "CC0-1.0"
+readme = "etc/crates-io-readme.md"
+repository = "https://github.com/casey/just"
+rust-version = "1.89.0"
 
 [workspace]
-members = [".", "bin/ref-type"]
+members = [".", "crates/*"]
 
 [dependencies]
-ansi_term = "0.12.0"
-atty = "0.2.0"
-camino = "1.0.4"
-clap = { version = "2.33.0", features = ["wrap_help"] }
-ctrlc = { version  = "3.1.1", features = ["termination"] }
-derivative = "2.0.0"
-dotenv = "0.15.0"
-edit-distance = "2.0.0"
-env_logger = "0.9.0"
-lazy_static = "1.0.0"
-lexiclean = "0.0.1"
+blake3 = { version = "1.5.0", features = ["mmap", "rayon", "serde"] }
+camino = { version = "1.0.4", features = ["serde1"] }
+chrono = "0.4.38"
+clap = { version = "4.0.0", features = ["derive", "env", "string", "wrap_help"] }
+clap_complete = { version = "=4.6.11", features = ["unstable-dynamic"] }
+clap_mangen = "0.3.0"
+digest-io = "0.1.0"
+dirs = "7.0.0"
+dotenvy = "0.15.0"
+heck = "0.5.0"
+hex = "0.4.3"
+is_executable = "1.0.4"
 libc = "0.2.0"
-log = "0.4.4"
-regex = "1.5.4"
+nu-ansi-term = "0.50.3"
+num_cpus = "1.15.0"
+percent-encoding = "2.3.1"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+rand = "0.10.0"
+regex = "1.10.4"
+semver = "1.0.20"
 serde = { version = "1.0.130", features = ["derive", "rc"] }
 serde_json = "1.0.68"
-similar = { version = "2.1.0", features = ["unicode"] }
-snafu = "0.6.0"
-strum = { version  = "0.23.0", features = ["derive"] }
-target = "2.0.0"
+sha2 = "0.11.0"
+shellexpand = "3.1.0"
+similar = { version = "3.0.0", features = ["unicode"] }
+snafu = "0.9.0"
+strsim = "0.11.1"
+strum = { version = "0.28.0", features = ["derive"] }
 tempfile = "3.0.0"
 typed-arena = "2.0.1"
-unicode-width = "0.1.0"
+unicode-width = "0.2.0"
+uuid = { version = "1.0.0", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.0", features = ["signal", "user", "fs"] }
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = { version = "3.1.1", features = ["termination"] }
 
 [dev-dependencies]
-cradle = "0.2.0"
-executable-path = "1.0.0"
 pretty_assertions = "1.0.0"
-temptree = "0.2.0"
-which = "4.0.0"
-yaml-rust = "0.4.5"
+which = "8.0.0"
 
-[features]
-# No features are active by default.
-default = []
-# The `help4help2man` feature modifies the message produced by `--help`
-# so that `help2man` produces a reasonable man page.
-help4help2man = []
+[lints.rust]
+mismatched_lifetime_syntaxes = "allow"
+unexpected_cfgs = "deny"
+unreachable_pub = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+arbitrary_source_item_ordering = "deny"
+assert_is_empty = "allow"
+enum_glob_use = "allow"
+format_push_string = "allow"
+ignore_without_reason = "allow"
+needless_pass_by_value = "allow"
+pedantic = { level = "deny", priority = -1 }
+self_named_constructors = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+struct_field_names = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "deny"
+unnecessary_wraps = "allow"
+wildcard_imports = "allow"
+
+[lib]
+doctest = false
+
+[[bin]]
+path = "src/main.rs"
+name = "just"
+test = false
 
 # The public documentation is minimal and doesn't change between
 # platforms, so we only build them for linux on docs.rs to save
@@ -63,6 +102,7 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [profile.release]
 lto = true
+codegen-units = 1
 
 [[test]]
 name = "integration"

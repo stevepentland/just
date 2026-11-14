@@ -1,4 +1,4 @@
-use crate::common::*;
+use super::*;
 
 const JUSTFILE: &str = "
 expression := `EXPRESSION`
@@ -13,31 +13,38 @@ recipe default=`DEFAULT`:
 #[test]
 #[cfg_attr(windows, ignore)]
 fn flag() {
-  let tmp = temptree! {
-    justfile: JUSTFILE,
-    shell: "#!/usr/bin/env bash\necho \"$@\"",
-  };
+  let tmp = tempdir();
+  fs::write(tmp.path().join("justfile"), JUSTFILE).unwrap();
+  fs::write(tmp.path().join("shell"), "#!/usr/bin/env bash\necho \"$@\"").unwrap();
 
   let shell = tmp.path().join("shell");
 
   #[cfg(not(windows))]
   {
     let permissions = std::os::unix::fs::PermissionsExt::from_mode(0o700);
-    std::fs::set_permissions(&shell, permissions).unwrap();
+    fs::set_permissions(&shell, permissions).unwrap();
   }
 
-  let output = Command::new(executable_path("just"))
+  let output = just()
     .current_dir(tmp.path())
     .arg("--shell")
     .arg(shell)
     .output()
     .unwrap();
 
-  let stdout = "-cu -cu EXPRESSION\n-cu -cu DEFAULT\n-cu RECIPE\n";
-  assert_stdout(&output, stdout);
+  assert_stdout(&output, "-cu -cu EXPRESSION\n-cu -cu DEFAULT\n-cu RECIPE\n");
 }
 
-const JUSTFILE_CMD: &str = r#"
+/// Test that we can use `set shell` to use cmd.exe on windows
+#[test]
+fn cmd() {
+  if cfg!(not(windows)) {
+    return;
+  }
+  let tmp = tempdir();
+  fs::write(
+    tmp.path().join("justfile"),
+    r#"
 
 set shell := ["cmd.exe", "/C"]
 
@@ -46,27 +53,25 @@ x := `Echo`
 recipe:
   REM foo
   Echo "{{x}}"
-"#;
+"#,
+  )
+  .unwrap();
+
+  let output = just().current_dir(tmp.path()).output().unwrap();
+
+  assert_stdout(&output, "\"ECHO is on.\"\r\n");
+}
 
 /// Test that we can use `set shell` to use cmd.exe on windows
 #[test]
-#[cfg_attr(unix, ignore)]
-fn cmd() {
-  let tmp = temptree! {
-    justfile: JUSTFILE_CMD,
-  };
-
-  let output = Command::new(executable_path("just"))
-    .current_dir(tmp.path())
-    .output()
-    .unwrap();
-
-  let stdout = "\\\"ECHO is on.\\\"\r\n";
-
-  assert_stdout(&output, stdout);
-}
-
-const JUSTFILE_POWERSHELL: &str = r#"
+fn powershell() {
+  if cfg!(not(windows)) {
+    return;
+  }
+  let tmp = tempdir();
+  fs::write(
+    tmp.path().join("justfile"),
+    r#"
 
 set shell := ["powershell.exe", "-c"]
 
@@ -75,79 +80,121 @@ x := `Write-Host "Hello, world!"`
 recipe:
   For ($i=0; $i -le 10; $i++) { Write-Host $i }
   Write-Host "{{x}}"
-"#;
+"#,
+  )
+  .unwrap();
 
-/// Test that we can use `set shell` to use cmd.exe on windows
+  let output = just().current_dir(tmp.path()).output().unwrap();
+
+  assert_stdout(&output, "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nHello, world!\n");
+}
+
 #[test]
-#[cfg_attr(unix, ignore)]
-fn powershell() {
-  let tmp = temptree! {
-    justfile: JUSTFILE_POWERSHELL,
-  };
-
-  let output = Command::new(executable_path("just"))
-    .current_dir(tmp.path())
-    .output()
-    .unwrap();
-
-  let stdout = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nHello, world!\n";
-
-  assert_stdout(&output, stdout);
+fn shell_args() {
+  Test::new()
+    .arg("--shell-arg")
+    .arg("-c")
+    .justfile(
+      "
+        default:
+          echo A${foo}A
+      ",
+    )
+    .shell(false)
+    .stdout("AA\n")
+    .stderr("echo A${foo}A\n")
+    .success();
 }
 
-test! {
-  name: shell_args,
-  justfile: "
-    default:
-      echo A${foo}A
-  ",
-  args: ("--shell-arg", "-c"),
-  stdout: "AA\n",
-  stderr: "echo A${foo}A\n",
-  shell: false,
+#[test]
+fn shell_override() {
+  Test::new()
+    .arg("--shell")
+    .arg("bash")
+    .justfile(
+      "
+        set shell := ['foo-bar-baz']
+
+        default:
+          echo hello
+      ",
+    )
+    .shell(false)
+    .stdout("hello\n")
+    .stderr("echo hello\n")
+    .success();
 }
 
-test! {
-  name: shell_override,
-  justfile: "
-    set shell := ['foo-bar-baz']
+#[test]
+fn shell_arg_override() {
+  Test::new()
+    .arg("--shell-arg")
+    .arg("-cu")
+    .justfile(
+      "
+        set shell := ['foo-bar-baz']
 
-    default:
-      echo hello
-  ",
-  args: ("--shell", "bash"),
-  stdout: "hello\n",
-  stderr: "echo hello\n",
-  shell: false,
+        default:
+          echo hello
+      ",
+    )
+    .stdout("hello\n")
+    .stderr("echo hello\n")
+    .shell(false)
+    .success();
 }
 
-test! {
-  name: shell_arg_override,
-  justfile: "
-    set shell := ['foo-bar-baz']
+#[test]
+fn set_shell() {
+  Test::new()
+    .justfile(
+      "
+        set shell := ['echo', '-n']
 
-    default:
-      echo hello
-  ",
-  args: ("--shell-arg", "-cu"),
-  stdout: "hello\n",
-  stderr: "echo hello\n",
-  shell: false,
+        x := `bar`
+
+        foo:
+          echo {{x}}
+          echo foo
+      ",
+    )
+    .stdout("echo barecho foo")
+    .stderr("echo bar\necho foo\n")
+    .shell(false)
+    .success();
 }
 
-test! {
-  name: set_shell,
-  justfile: "
-    set shell := ['echo', '-n']
+#[test]
+fn recipe_shell_not_found_error_message() {
+  Test::new()
+    .justfile(
+      "
+        foo:
+          @echo bar
+      ",
+    )
+    .shell(false)
+    .args(["--shell", "NOT_A_REAL_SHELL"])
+    .stderr_regex(
+      "error: recipe `foo` could not be run because just could not find the shell \
+      `NOT_A_REAL_SHELL`: .*\n",
+    )
+    .failure();
+}
 
-    x := `bar`
+#[test]
+fn backtick_recipe_shell_not_found_error_message() {
+  Test::new()
+    .justfile(
+      "
+        bar := `echo bar`
 
-    foo:
-      echo {{x}}
-      echo foo
-  ",
-  args: (),
-  stdout: "echo barecho foo",
-  stderr: "echo bar\necho foo\n",
-  shell: false,
+        foo:
+          echo {{bar}}
+      ",
+    )
+    .shell(false)
+    .args(["--shell", "NOT_A_REAL_SHELL"])
+    .stderr_regex("(?s)error: backtick could not be run because just could not find the shell:.*")
+    .failure();
 }

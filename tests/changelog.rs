@@ -1,9 +1,10 @@
-use crate::common::*;
+use super::*;
 
 #[test]
 fn print_changelog() {
   Test::new()
-    .args(&["--changelog"])
+    .justfile("")
+    .args(["--changelog"])
     .stdout(fs::read_to_string("CHANGELOG.md").unwrap())
-    .run();
+    .success();
 }

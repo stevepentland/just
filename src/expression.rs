@@ -1,4 +1,4 @@
-use crate::common::*;
+use super::*;
 
 /// An expression. Note that the Just language grammar has both an `expression`
 /// production of additions (`a + b`) and values, and a `value` production of
@@ -6,105 +6,345 @@ use crate::common::*;
 /// parenthetical groups).
 ///
 /// The parser parses both values and expressions into `Expression`s.
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone, Ord, PartialOrd)]
 pub(crate) enum Expression<'src> {
+  /// `lhs && rhs`
+  And { lhs: Box<Self>, rhs: Box<Self> },
+  /// `assert(condition, error)`
+  Assert {
+    condition: Box<Self>,
+    message: Option<Box<Self>>,
+    name: Name<'src>,
+  },
   /// `contents`
   Backtick {
     contents: String,
     token: Token<'src>,
   },
   /// `name(arguments)`
-  Call { thunk: Thunk<'src> },
-  /// `lhs + rhs`
-  Concatination {
-    lhs: Box<Expression<'src>>,
-    rhs: Box<Expression<'src>>,
+  Call {
+    name: Name<'src>,
+    arguments: Vec<Expression<'src>>,
   },
-  /// `if lhs == rhs { then } else { otherwise }`
-  Conditional {
-    lhs: Box<Expression<'src>>,
-    rhs: Box<Expression<'src>>,
-    then: Box<Expression<'src>>,
-    otherwise: Box<Expression<'src>>,
+  /// `lhs == rhs`
+  Comparison {
+    lhs: Box<Self>,
     operator: ConditionalOperator,
+    rhs: Box<Self>,
+    token: Token<'src>,
+  },
+  /// `lhs + rhs`
+  Concatenation {
+    lhs: Box<Self>,
+    operator: Token<'src>,
+    rhs: Box<Self>,
+  },
+  /// `if condition { then } else { otherwise }`
+  Conditional {
+    condition: Box<Self>,
+    then: Box<Self>,
+    otherwise: Option<Box<Self>>,
+  },
+  // `f"format string"`
+  FormatString {
+    start: StringLiteral<'src>,
+    expressions: Vec<(Self, StringLiteral<'src>)>,
   },
   /// `(contents)`
-  Group { contents: Box<Expression<'src>> },
+  Group { contents: Box<Self> },
+  /// `lhs / rhs`
+  Join {
+    lhs: Option<Box<Self>>,
+    operator: Token<'src>,
+    rhs: Box<Self>,
+  },
+  /// `[a, b, c]`
+  List {
+    elements: Vec<Expression<'src>>,
+    open: Token<'src>,
+  },
+  /// `lhs ++ rhs`
+  ListConcatenation {
+    lhs: Box<Self>,
+    operator: Token<'src>,
+    rhs: Box<Self>,
+  },
+  /// `!operand`
+  Not { operand: Box<Self> },
+  /// `lhs || rhs`
+  Or { lhs: Box<Self>, rhs: Box<Self> },
   /// `"string_literal"` or `'string_literal'`
   StringLiteral { string_literal: StringLiteral<'src> },
   /// `variable`
-  Variable { name: Name<'src> },
+  Variable {
+    name: Name<'src>,
+    number: Option<Number>,
+  },
 }
 
 impl<'src> Expression<'src> {
-  pub(crate) fn variables<'expression>(&'expression self) -> Variables<'expression, 'src> {
-    Variables::new(self)
+  pub(crate) fn references<'a>(&'a self) -> References<'a, 'src> {
+    References::new(self)
   }
-}
 
-impl<'src> Display for Expression<'src> {
-  fn fmt(&self, f: &mut Formatter) -> Result<(), fmt::Error> {
+  pub(crate) fn resolve_variables(
+    &mut self,
+    context: Option<&ExpressionContext<'src>>,
+    bindings: &HashMap<&'src str, Number>,
+  ) {
     match self {
-      Expression::Backtick { token, .. } => write!(f, "{}", token.lexeme()),
-      Expression::Concatination { lhs, rhs } => write!(f, "{} + {}", lhs, rhs),
-      Expression::Conditional {
-        lhs,
-        rhs,
+      Self::And { lhs, rhs }
+      | Self::Comparison { lhs, rhs, .. }
+      | Self::Concatenation { lhs, rhs, .. }
+      | Self::ListConcatenation { lhs, rhs, .. }
+      | Self::Or { lhs, rhs } => {
+        lhs.resolve_variables(context, bindings);
+        rhs.resolve_variables(context, bindings);
+      }
+      Self::Assert {
+        condition, message, ..
+      } => {
+        condition.resolve_variables(context, bindings);
+        if let Some(message) = message {
+          message.resolve_variables(context, bindings);
+        }
+      }
+      Self::Backtick { .. } | Self::StringLiteral { .. } => {}
+      Self::Call { arguments, .. } => {
+        for argument in arguments {
+          argument.resolve_variables(context, bindings);
+        }
+      }
+      Self::Conditional {
+        condition,
         then,
         otherwise,
-        operator,
-      } => write!(
-        f,
-        "if {} {} {} {{ {} }} else {{ {} }}",
-        lhs, operator, rhs, then, otherwise
-      ),
-      Expression::StringLiteral { string_literal } => write!(f, "{}", string_literal),
-      Expression::Variable { name } => write!(f, "{}", name.lexeme()),
-      Expression::Call { thunk } => write!(f, "{}", thunk),
-      Expression::Group { contents } => write!(f, "({})", contents),
+      } => {
+        condition.resolve_variables(context, bindings);
+        then.resolve_variables(context, bindings);
+        if let Some(otherwise) = otherwise {
+          otherwise.resolve_variables(context, bindings);
+        }
+      }
+      Self::FormatString { expressions, .. } => {
+        for (expression, _string) in expressions {
+          expression.resolve_variables(context, bindings);
+        }
+      }
+      Self::Group { contents } => contents.resolve_variables(context, bindings),
+      Self::Join { lhs, rhs, .. } => {
+        if let Some(lhs) = lhs {
+          lhs.resolve_variables(context, bindings);
+        }
+        rhs.resolve_variables(context, bindings);
+      }
+      Self::List { elements, .. } => {
+        for element in elements {
+          element.resolve_variables(context, bindings);
+        }
+      }
+      Self::Not { operand } => operand.resolve_variables(context, bindings),
+      Self::Variable { name, number } => {
+        let name = name.lexeme();
+        *number = context
+          .and_then(|context| context.lookup(name))
+          .or_else(|| bindings.get(name).copied());
+      }
     }
   }
 }
 
-impl<'src> Serialize for Expression<'src> {
+impl Display for Expression<'_> {
+  fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+    match self {
+      Self::And { lhs, rhs } => write!(f, "{lhs} && {rhs}"),
+      Self::Assert {
+        condition, message, ..
+      } => {
+        if let Some(error) = message {
+          write!(f, "assert({condition}, {error})")
+        } else {
+          write!(f, "assert({condition})")
+        }
+      }
+      Self::Backtick { token, .. } => write!(f, "{}", token.lexeme()),
+      Self::Call { name, arguments } => {
+        write!(f, "{name}(")?;
+        for (i, argument) in arguments.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{argument}")?;
+        }
+        write!(f, ")")
+      }
+      Self::Comparison {
+        lhs, operator, rhs, ..
+      } => write!(f, "{lhs} {operator} {rhs}"),
+      Self::Concatenation { lhs, rhs, .. } => write!(f, "{lhs} + {rhs}"),
+      Self::ListConcatenation { lhs, rhs, .. } => write!(f, "{lhs} ++ {rhs}"),
+      Self::Conditional {
+        condition,
+        then,
+        otherwise,
+      } => {
+        write!(f, "if {condition} {{ {then} }}")?;
+        if let Some(otherwise) = otherwise {
+          if let Self::Conditional { .. } = **otherwise {
+            write!(f, " else {otherwise}")?;
+          } else {
+            write!(f, " else {{ {otherwise} }}")?;
+          }
+        }
+        Ok(())
+      }
+      Self::FormatString { start, expressions } => {
+        write!(f, "{start}")?;
+
+        for (expression, string) in expressions {
+          write!(f, " {expression} {string}")?;
+        }
+
+        Ok(())
+      }
+      Self::Group { contents } => write!(f, "({contents})"),
+      Self::Join { lhs: None, rhs, .. } => write!(f, "/ {rhs}"),
+      Self::Join {
+        lhs: Some(lhs),
+        rhs,
+        ..
+      } => write!(f, "{lhs} / {rhs}"),
+      Self::List { elements, .. } => {
+        write!(f, "[")?;
+        for (i, element) in elements.iter().enumerate() {
+          if i > 0 {
+            write!(f, ", ")?;
+          }
+          write!(f, "{element}")?;
+        }
+        write!(f, "]")
+      }
+      Self::Not { operand } => write!(f, "!{operand}"),
+      Self::Or { lhs, rhs } => write!(f, "{lhs} || {rhs}"),
+      Self::StringLiteral { string_literal } => write!(f, "{string_literal}"),
+      Self::Variable { name, .. } => write!(f, "{name}"),
+    }
+  }
+}
+
+impl Serialize for Expression<'_> {
   fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
   where
     S: Serializer,
   {
     match self {
+      Self::And { lhs, rhs } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("and")?;
+        seq.serialize_element(lhs)?;
+        seq.serialize_element(rhs)?;
+        seq.end()
+      }
+      Self::Assert {
+        condition, message, ..
+      } => {
+        let mut seq: <S as Serializer>::SerializeSeq = serializer.serialize_seq(None)?;
+        seq.serialize_element("assert")?;
+        seq.serialize_element(condition)?;
+        seq.serialize_element(message)?;
+        seq.end()
+      }
       Self::Backtick { contents, .. } => {
         let mut seq = serializer.serialize_seq(None)?;
         seq.serialize_element("evaluate")?;
         seq.serialize_element(contents)?;
         seq.end()
       }
-      Self::Call { thunk } => thunk.serialize(serializer),
-      Self::Concatination { lhs, rhs } => {
+      Self::Call { name, arguments } => {
         let mut seq = serializer.serialize_seq(None)?;
-        seq.serialize_element("concatinate")?;
+        seq.serialize_element("call")?;
+        seq.serialize_element(name)?;
+        for argument in arguments {
+          seq.serialize_element(argument)?;
+        }
+        seq.end()
+      }
+      Self::Comparison {
+        lhs, operator, rhs, ..
+      } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element(&operator.to_string())?;
+        seq.serialize_element(lhs)?;
+        seq.serialize_element(rhs)?;
+        seq.end()
+      }
+      Self::Concatenation { lhs, rhs, .. } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("concatenate")?;
+        seq.serialize_element(lhs)?;
+        seq.serialize_element(rhs)?;
+        seq.end()
+      }
+      Self::ListConcatenation { lhs, rhs, .. } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("list-concatenate")?;
         seq.serialize_element(lhs)?;
         seq.serialize_element(rhs)?;
         seq.end()
       }
       Self::Conditional {
-        lhs,
-        rhs,
+        condition,
         then,
         otherwise,
-        operator,
       } => {
         let mut seq = serializer.serialize_seq(None)?;
         seq.serialize_element("if")?;
-        seq.serialize_element(&operator.to_string())?;
-        seq.serialize_element(lhs)?;
-        seq.serialize_element(rhs)?;
+        seq.serialize_element(condition)?;
         seq.serialize_element(then)?;
         seq.serialize_element(otherwise)?;
         seq.end()
       }
+      Self::FormatString { start, expressions } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("format")?;
+        seq.serialize_element(start)?;
+        for (expression, string) in expressions {
+          seq.serialize_element(expression)?;
+          seq.serialize_element(string)?;
+        }
+        seq.end()
+      }
       Self::Group { contents } => contents.serialize(serializer),
+      Self::Join { lhs, rhs, .. } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("join")?;
+        seq.serialize_element(lhs)?;
+        seq.serialize_element(rhs)?;
+        seq.end()
+      }
+      Self::List { elements, .. } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("list")?;
+        for element in elements {
+          seq.serialize_element(element)?;
+        }
+        seq.end()
+      }
+      Self::Not { operand } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("not")?;
+        seq.serialize_element(operand)?;
+        seq.end()
+      }
+      Self::Or { lhs, rhs } => {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element("or")?;
+        seq.serialize_element(lhs)?;
+        seq.serialize_element(rhs)?;
+        seq.end()
+      }
       Self::StringLiteral { string_literal } => string_literal.serialize(serializer),
-      Self::Variable { name } => {
+      Self::Variable { name, .. } => {
         let mut seq = serializer.serialize_seq(None)?;
         seq.serialize_element("variable")?;
         seq.serialize_element(name)?;

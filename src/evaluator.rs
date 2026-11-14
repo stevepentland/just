@@ -1,211 +1,731 @@
-use crate::common::*;
+use super::*;
 
 pub(crate) struct Evaluator<'src: 'run, 'run> {
   assignments: Option<&'run Table<'src, Assignment<'src>>>,
-  config: &'run Config,
-  dotenv: &'run BTreeMap<String, String>,
+  context: Option<ExecutionContext<'src, 'run>>,
+  env: BTreeMap<String, String>,
+  is_dependency: bool,
+  lists: bool,
+  non_const_assignments: HashSet<Number>,
+  overrides: &'run HashMap<Number, String>,
+  recipe: Option<Name<'src>>,
+  recursion_depth: usize,
   scope: Scope<'src, 'run>,
-  settings: &'run Settings<'run>,
-  search: &'run Search,
 }
 
 impl<'src, 'run> Evaluator<'src, 'run> {
-  pub(crate) fn evaluate_assignments(
+  fn context(
+    &self,
+    const_error: ConstError<'src>,
+  ) -> Result<&ExecutionContext<'src, 'run>, ConstError<'src>> {
+    self.context.as_ref().ok_or(const_error)
+  }
+
+  pub(crate) fn evaluate_const_assignments(
     assignments: &'run Table<'src, Assignment<'src>>,
+    evaluation_order: &[Name<'src>],
+    overrides: &'run HashMap<Number, String>,
+    scope: &'run Scope<'src, 'run>,
+    variable_references: &HashSet<Number>,
+    lists: bool,
+  ) -> CompileResult<'src, Self> {
+    let mut evaluator = Self {
+      assignments: Some(assignments),
+      context: None,
+      env: BTreeMap::new(),
+      is_dependency: false,
+      lists,
+      non_const_assignments: HashSet::new(),
+      overrides,
+      recipe: None,
+      recursion_depth: 0,
+      scope: scope.child(),
+    };
+
+    for assignment in evaluation_order {
+      let assignment = &assignments[assignment.lexeme()];
+      if variable_references.contains(&assignment.number) {
+        match evaluator
+          .evaluate_assignment(assignment)
+          .map_err(Error::unwrap_const)
+        {
+          Err(ConstEvalError::Const(_)) => {
+            evaluator.non_const_assignments.insert(assignment.number);
+          }
+          Err(error) => return Err(error.into_compile_error()),
+          Ok(_) => {}
+        }
+      }
+    }
+
+    Ok(evaluator)
+  }
+
+  pub(crate) fn evaluate_sets(
+    &self,
+    sets: Table<'src, Set<'src>>,
+  ) -> CompileResult<'src, Settings> {
+    let mut settings = Settings::default();
+
+    for (_name, set) in sets {
+      match set.value {
+        Setting::AllowDuplicateRecipes(value) => {
+          settings.allow_duplicate_recipes = value;
+        }
+        Setting::AllowDuplicateVariables(value) => {
+          settings.allow_duplicate_variables = value;
+        }
+        Setting::DefaultList(value) => {
+          settings.default_list = value;
+        }
+        Setting::DefaultScript(value) => {
+          settings.default_script = value;
+        }
+        Setting::DotenvCommand(value) => {
+          settings.dotenv_command = self.evaluate_value_const(&value)?;
+        }
+        Setting::DotenvFilename(value) => {
+          settings.dotenv_filename = self.evaluate_value_const(&value)?;
+        }
+        Setting::DotenvLoad(value) => {
+          settings.dotenv_load = value;
+        }
+        Setting::DotenvPath(value) => {
+          settings.dotenv_path = self.evaluate_value_const(&value)?;
+        }
+        Setting::DotenvOverride(value) => {
+          settings.dotenv_override = value;
+        }
+        Setting::DotenvRequired(value) => {
+          settings.dotenv_required = value;
+        }
+        Setting::DryRun(_, value) => {
+          settings.dry_run = value;
+        }
+        Setting::Export(value) => {
+          settings.export = value;
+        }
+        Setting::Fallback(value) => {
+          settings.fallback = value;
+        }
+        Setting::Guards(guards) => {
+          settings.guards = guards;
+        }
+        Setting::IgnoreComments(value) => {
+          settings.ignore_comments = value;
+        }
+        Setting::Indentation(_, indentation) => {
+          settings.indentation = Some(indentation);
+        }
+        Setting::Lazy(value) => {
+          settings.lazy = value;
+        }
+        Setting::Lists(value) => {
+          settings.lists = value;
+        }
+        Setting::MinimumVersion(_) => {}
+        Setting::NoCd(value) => {
+          settings.no_cd = value;
+        }
+        Setting::NoExitMessage(value) => {
+          settings.no_exit_message = value;
+        }
+        Setting::PositionalArguments(value) => {
+          settings.positional_arguments = value;
+        }
+        Setting::Quiet(value) => {
+          settings.quiet = value;
+        }
+        Setting::ScriptInterpreter(value) => {
+          settings.script_interpreter = Some(self.evaluate_interpreter(&value, set.name)?);
+        }
+        Setting::Shell(value) => {
+          settings.shell = Some(self.evaluate_interpreter(&value, set.name)?);
+        }
+        Setting::Unstable(value) => {
+          settings.unstable = value;
+        }
+        Setting::WindowsPowerShell(value) => {
+          settings.windows_powershell = value;
+        }
+        Setting::WindowsShell(value) => {
+          settings.windows_shell = Some(self.evaluate_interpreter(&value, set.name)?);
+        }
+        Setting::Tempdir(value) => {
+          settings.tempdir =
+            Some(self.evaluate_string_const(&value, StringContext::Setting(set.name))?);
+        }
+        Setting::WorkingDirectory(value) => {
+          settings.working_directory = Some(
+            self
+              .evaluate_string_const(&value, StringContext::Setting(set.name))?
+              .into(),
+          );
+        }
+      }
+    }
+
+    Ok(settings)
+  }
+
+  pub(crate) fn evaluate_interpreter(
+    &self,
+    interpreter: &Interpreter<Expression<'src>>,
+    setting: Name<'src>,
+  ) -> CompileResult<'src, Interpreter<String>> {
+    let mut elements = self
+      .evaluate_value_const(&interpreter.command)?
+      .into_elements();
+    for argument in &interpreter.arguments {
+      elements.extend(self.evaluate_value_const(argument)?.into_elements());
+    }
+
+    let mut elements = elements.into_iter();
+
+    let Some(command) = elements.next() else {
+      return Err(ConstEvalError::EmptyInterpreter { setting }.into_compile_error());
+    };
+
+    Ok(Interpreter {
+      command,
+      arguments: elements.collect(),
+    })
+  }
+
+  pub(crate) fn evaluate_assignments(
     config: &'run Config,
     dotenv: &'run BTreeMap<String, String>,
-    overrides: Scope<'src, 'run>,
-    settings: &'run Settings<'run>,
+    module: &'run Justfile<'src>,
+    overrides: &'run HashMap<Number, String>,
+    parent: &'run Scope<'src, 'run>,
     search: &'run Search,
-  ) -> RunResult<'src, Scope<'src, 'run>> {
-    let mut evaluator = Evaluator {
-      scope: overrides,
-      assignments: Some(assignments),
+    variable_references: Option<&HashSet<Number>>,
+  ) -> RunResult<'src, Scope<'src, 'run>>
+  where
+    'src: 'run,
+  {
+    let context = ExecutionContext {
       config,
       dotenv,
-      settings,
+      module,
+      overrides,
+      scope: parent,
       search,
     };
 
-    for assignment in assignments.values() {
-      evaluator.evaluate_assignment(assignment)?;
+    let mut evaluator = Self {
+      assignments: Some(&module.assignments),
+      recursion_depth: 0,
+      context: Some(context),
+      env: BTreeMap::new(),
+      is_dependency: false,
+      lists: module.settings.lists,
+      non_const_assignments: HashSet::new(),
+      overrides,
+      recipe: None,
+      scope: parent.child(),
+    };
+
+    for assignment in &module.evaluation_order {
+      let assignment = &module.assignments[assignment.lexeme()];
+      if variable_references
+        .is_none_or(|variable_references| variable_references.contains(&assignment.number))
+      {
+        evaluator.evaluate_assignment(assignment)?;
+      }
     }
 
     Ok(evaluator.scope)
   }
 
-  fn evaluate_assignment(&mut self, assignment: &Assignment<'src>) -> RunResult<'src, &str> {
-    let name = assignment.name.lexeme();
+  fn evaluate_assignment(&mut self, assignment: &Assignment<'src>) -> RunResult<'src, &Value> {
+    if self.scope.binding(assignment.number).is_none() {
+      let value = if let Some(value) = self.overrides.get(&assignment.number) {
+        value.into()
+      } else {
+        self.evaluate_value(&assignment.value)?
+      };
 
-    if !self.scope.bound(name) {
-      let value = self.evaluate_expression(&assignment.value)?;
-      self.scope.bind(assignment.export, assignment.name, value);
+      self.scope.bind(Binding {
+        attributes: AttributeSet::new(),
+        eager: assignment.eager,
+        export: assignment.export
+          || self
+            .context
+            .is_some_and(|context| context.module.settings.export),
+        file_depth: 0,
+        name: assignment.name,
+        number: assignment.number,
+        prelude: false,
+        private: assignment.private,
+        value,
+      });
     }
 
-    Ok(self.scope.value(name).unwrap())
+    Ok(self.scope.value(assignment.number).unwrap())
   }
 
-  pub(crate) fn evaluate_expression(
-    &mut self,
-    expression: &Expression<'src>,
-  ) -> RunResult<'src, String> {
-    match expression {
-      Expression::Variable { name, .. } => {
-        let variable = name.lexeme();
-        if let Some(value) = self.scope.value(variable) {
-          Ok(value.to_owned())
-        } else if let Some(assignment) = self
-          .assignments
-          .and_then(|assignments| assignments.get(variable))
-        {
-          Ok(self.evaluate_assignment(assignment)?.to_owned())
-        } else {
-          Err(Error::Internal {
-            message: format!("attempted to evaluate undefined variable `{}`", variable),
-          })
-        }
-      }
-      Expression::Call { thunk } => {
-        use Thunk::*;
-
-        let context = FunctionContext {
-          dotenv: self.dotenv,
-          invocation_directory: &self.config.invocation_directory,
-          search: self.search,
-        };
-
-        match thunk {
-          Nullary { name, function, .. } => {
-            function(&context).map_err(|message| Error::FunctionCall {
-              function: *name,
-              message,
-            })
-          }
-          Unary {
-            name,
-            function,
-            arg,
-            ..
-          } => function(&context, &self.evaluate_expression(arg)?).map_err(|message| {
-            Error::FunctionCall {
-              function: *name,
-              message,
-            }
-          }),
-          Binary {
-            name,
-            function,
-            args: [a, b],
-            ..
-          } => function(
-            &context,
-            &self.evaluate_expression(a)?,
-            &self.evaluate_expression(b)?,
-          )
-          .map_err(|message| Error::FunctionCall {
-            function: *name,
-            message,
-          }),
-          BinaryPlus {
-            name,
-            function,
-            args: ([a, b], rest),
-            ..
-          } => {
-            let a = self.evaluate_expression(a)?;
-            let b = self.evaluate_expression(b)?;
-
-            let mut rest_evaluated = Vec::new();
-            for arg in rest {
-              rest_evaluated.push(self.evaluate_expression(arg)?);
-            }
-
-            function(&context, &a, &b, &rest_evaluated).map_err(|message| Error::FunctionCall {
-              function: *name,
-              message,
-            })
-          }
-          Ternary {
-            name,
-            function,
-            args: [a, b, c],
-            ..
-          } => function(
-            &context,
-            &self.evaluate_expression(a)?,
-            &self.evaluate_expression(b)?,
-            &self.evaluate_expression(c)?,
-          )
-          .map_err(|message| Error::FunctionCall {
-            function: *name,
-            message,
-          }),
-        }
-      }
-      Expression::StringLiteral { string_literal } => Ok(string_literal.cooked.clone()),
-      Expression::Backtick { contents, token } => {
-        if self.config.dry_run {
-          Ok(format!("`{}`", contents))
-        } else {
-          Ok(self.run_backtick(contents, token)?)
-        }
-      }
-      Expression::Concatination { lhs, rhs } => {
-        Ok(self.evaluate_expression(lhs)? + &self.evaluate_expression(rhs)?)
-      }
-      Expression::Conditional {
-        lhs,
-        rhs,
-        then,
-        otherwise,
-        operator,
-      } => {
-        let lhs_value = self.evaluate_expression(lhs)?;
-        let rhs_value = self.evaluate_expression(rhs)?;
-        let condition = match operator {
-          ConditionalOperator::Equality => lhs_value == rhs_value,
-          ConditionalOperator::Inequality => lhs_value != rhs_value,
-          ConditionalOperator::RegexMatch => Regex::new(&rhs_value)
-            .map_err(|source| Error::RegexCompile { source })?
-            .is_match(&lhs_value),
-        };
-        if condition {
-          self.evaluate_expression(then)
-        } else {
-          self.evaluate_expression(otherwise)
-        }
-      }
-      Expression::Group { contents } => self.evaluate_expression(contents),
-    }
-  }
-
-  fn run_backtick(&self, raw: &str, token: &Token<'src>) -> RunResult<'src, String> {
-    let mut cmd = self.settings.shell_command(self.config);
-
-    cmd.arg(raw);
-
-    cmd.current_dir(&self.search.working_directory);
-
-    cmd.export(self.settings, self.dotenv, &self.scope);
-
-    cmd.stdin(process::Stdio::inherit());
-
-    cmd.stderr(if self.config.verbosity.quiet() {
-      process::Stdio::null()
-    } else {
-      process::Stdio::inherit()
-    });
-
-    InterruptHandler::guard(|| {
-      output(cmd).map_err(|output_error| Error::Backtick {
-        token: *token,
-        output_error,
-      })
+  fn function_context(&self, name: Name<'src>) -> RunResult<'src, function::Context> {
+    Ok(function::Context {
+      env: &self.env,
+      execution_context: self.context(ConstError::FunctionCall(name))?,
+      is_dependency: self.is_dependency,
+      name,
+      recipe: self.recipe,
+      scope: &self.scope,
     })
   }
 
+  fn evaluate_defined_function(
+    &self,
+    function: &FunctionDefinition<'src>,
+    arguments: &[Expression<'src>],
+  ) -> RunResult<'src, Value> {
+    let recursion_depth = self.recursion_depth + 1;
+
+    if recursion_depth == RECURSION_LIMIT {
+      return Err(Error::RecursionLimit {
+        last: function.name,
+      });
+    }
+
+    let context = *self.context.as_ref().unwrap();
+
+    let values = arguments
+      .iter()
+      .map(|argument| self.evaluate_value(argument))
+      .collect::<RunResult<Vec<Value>>>()?;
+
+    let parent = if self.assignments.is_some() {
+      &self.scope
+    } else {
+      context.scope
+    };
+
+    let mut scope = parent.child();
+    for ((name, number), value) in function.parameters.iter().copied().zip(values) {
+      scope.bind(Binding {
+        attributes: AttributeSet::new(),
+        eager: false,
+        export: false,
+        file_depth: 0,
+        name,
+        number,
+        prelude: false,
+        private: false,
+        value,
+      });
+    }
+
+    let evaluator = Evaluator {
+      assignments: Some(&context.module.assignments),
+      context: Some(context),
+      env: BTreeMap::new(),
+      is_dependency: self.is_dependency,
+      lists: self.lists,
+      non_const_assignments: HashSet::new(),
+      overrides: self.overrides,
+      recipe: self.recipe,
+      recursion_depth,
+      scope,
+    };
+
+    evaluator.evaluate_value(&function.body)
+  }
+
+  fn evaluate_builtin_function(
+    &self,
+    name: Name<'src>,
+    function: Function,
+    arguments: &[Expression<'src>],
+  ) -> RunResult<'src, Value> {
+    let context = self.function_context(name).unwrap();
+    match function {
+      Function::Nullary(f) => f(context).map(Value::from),
+      Function::Unary(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        f(context, &a).map(Value::from)
+      }
+      Function::UnaryToValue(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        f(context, &a)
+      }
+      Function::UnaryMap(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        a.elements()
+          .iter()
+          .map(|element| f(context, element))
+          .collect()
+      }
+      Function::UnaryPlus(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let mut rest = Vec::new();
+        for arg in &arguments[1..] {
+          rest.push(self.evaluate_string(arg, StringContext::Function(name))?);
+        }
+        f(context, &a, &rest).map(Value::from)
+      }
+      Function::BinaryStrValue(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = self.evaluate_value(&arguments[1])?;
+        f(context, &a, &b)
+      }
+      Function::Binary(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = self.evaluate_string(&arguments[1], StringContext::Function(name))?;
+        f(context, &a, &b).map(Value::from)
+      }
+      Function::BinaryToValue(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = self.evaluate_string(&arguments[1], StringContext::Function(name))?;
+        f(context, &a, &b)
+      }
+      Function::BinaryPlus(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = self.evaluate_string(&arguments[1], StringContext::Function(name))?;
+        let mut rest = Vec::new();
+        for arg in &arguments[2..] {
+          rest.push(self.evaluate_string(arg, StringContext::Function(name))?);
+        }
+        f(context, &a, &b, &rest).map(Value::from)
+      }
+      Function::Ternary(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = self.evaluate_string(&arguments[1], StringContext::Function(name))?;
+        let c = self.evaluate_string(&arguments[2], StringContext::Function(name))?;
+        f(context, &a, &b, &c).map(Value::from)
+      }
+      Function::ValueNullary(f) => f(context),
+      Function::ValueUnary(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        f(context, &a)
+      }
+      Function::ValueBinary(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        let b = self.evaluate_value(&arguments[1])?;
+        f(context, &a, &b)
+      }
+      Function::ValueBinaryOpt(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        let b = if arguments.len() > 1 {
+          Some(self.evaluate_value(&arguments[1])?)
+        } else {
+          None
+        };
+        f(context, &a, b.as_ref())
+      }
+      Function::BinaryOptToValue(f) => {
+        let a = self.evaluate_string(&arguments[0], StringContext::Function(name))?;
+        let b = if arguments.len() > 1 {
+          Some(self.evaluate_string(&arguments[1], StringContext::Function(name))?)
+        } else {
+          None
+        };
+        f(context, &a, b.as_deref())
+      }
+      Function::BinaryOptValueStr(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        let b = if arguments.len() > 1 {
+          Some(self.evaluate_string(&arguments[1], StringContext::Function(name))?)
+        } else {
+          None
+        };
+        f(context, &a, b.as_deref()).map(Value::from)
+      }
+      Function::BinaryOptValueStrToValue(f) => {
+        let a = self.evaluate_value(&arguments[0])?;
+        let b = if arguments.len() > 1 {
+          Some(self.evaluate_string(&arguments[1], StringContext::Function(name))?)
+        } else {
+          None
+        };
+        f(context, &a, b.as_deref())
+      }
+    }
+    .map_err(|message| Error::FunctionCall {
+      function: name,
+      message,
+    })
+  }
+
+  pub(crate) fn evaluate_string(
+    &self,
+    expression: &Expression<'src>,
+    context: StringContext<'src>,
+  ) -> RunResult<'src, String> {
+    let value = self.evaluate_value(expression)?;
+
+    if value.elements().len() != 1 {
+      return Err(Error::ListInStringContext { context, value });
+    }
+
+    Ok(value.join())
+  }
+
+  pub(crate) fn evaluate_value_const(
+    &self,
+    expression: &Expression<'src>,
+  ) -> CompileResult<'src, Value> {
+    assert!(self.context.is_none());
+    self
+      .evaluate_value(expression)
+      .map_err(|error| error.unwrap_const().into_compile_error())
+  }
+
+  pub(crate) fn evaluate_string_const(
+    &self,
+    expression: &Expression<'src>,
+    context: StringContext<'src>,
+  ) -> CompileResult<'src, String> {
+    assert!(self.context.is_none());
+    self
+      .evaluate_string(expression, context)
+      .map_err(|error| error.unwrap_const().into_compile_error())
+  }
+
+  pub(crate) fn evaluate_value(&self, expression: &Expression<'src>) -> RunResult<'src, Value> {
+    match expression {
+      Expression::And { lhs, rhs } => {
+        let lhs = self.evaluate_value(lhs)?;
+        if lhs.is_truthy() {
+          self.evaluate_value(rhs)
+        } else {
+          Ok(Value::new())
+        }
+      }
+      Expression::Assert {
+        condition,
+        message,
+        name,
+      } => {
+        let value = self.evaluate_value(condition)?;
+        if value.is_truthy() {
+          Ok(if self.lists { value } else { Value::from("") })
+        } else {
+          Err(Error::Assert {
+            message: if let Some(message) = message {
+              self.evaluate_value(message)?.join()
+            } else {
+              format!("`{condition}`")
+            },
+            name: *name,
+          })
+        }
+      }
+      Expression::Backtick { contents, token } => {
+        let context = self.context(ConstError::Backtick(*token))?;
+
+        if context.module.settings.skip_commands(context.config) {
+          return Ok(Value::from(format!("`{contents}`")));
+        }
+
+        Self::run_command(context, &self.env, &self.scope, contents, None)
+          .map(Value::from)
+          .map_err(|output_error| Error::Backtick {
+            token: *token,
+            output_error,
+          })
+      }
+      Expression::Call { name, arguments } => {
+        let module = self.context(ConstError::FunctionCall(*name))?.module;
+        if let Some(function) = module.functions.get(name.lexeme()) {
+          self.evaluate_defined_function(function, arguments)
+        } else if let Some(builtin) = function::get(name.lexeme()) {
+          self.evaluate_builtin_function(*name, builtin, arguments)
+        } else {
+          unreachable!();
+        }
+      }
+      Expression::Comparison { .. } => Ok(self.evaluate_boolean(expression)?.into()),
+      Expression::Concatenation { lhs, operator, rhs } => {
+        let lhs = self.evaluate_value(lhs)?;
+        let rhs = self.evaluate_value(rhs)?;
+        lhs.apply(&rhs, ListOperator::Concatenate, *operator)
+      }
+      Expression::ListConcatenation { lhs, rhs, .. } => {
+        let lhs = self.evaluate_value(lhs)?;
+        let rhs = self.evaluate_value(rhs)?;
+        Ok(
+          lhs
+            .into_elements()
+            .into_iter()
+            .chain(rhs.into_elements())
+            .collect(),
+        )
+      }
+      Expression::Conditional {
+        condition,
+        then,
+        otherwise,
+      } => {
+        if self.evaluate_boolean(condition)? {
+          self.evaluate_value(then)
+        } else if let Some(otherwise) = otherwise {
+          self.evaluate_value(otherwise)
+        } else {
+          Ok(Value::new())
+        }
+      }
+      Expression::FormatString { start, expressions } => {
+        let mut value = start.cooked.clone();
+
+        for (expression, string) in expressions {
+          value.push_str(&self.evaluate_value(expression)?.join());
+          value.push_str(&string.cooked);
+        }
+
+        if start.kind.indented {
+          Ok(unindent(&value).into())
+        } else {
+          Ok(value.into())
+        }
+      }
+      Expression::Group { contents } => self.evaluate_value(contents),
+      Expression::Join {
+        lhs: None,
+        operator,
+        rhs,
+      } => {
+        let rhs = self.evaluate_value(rhs)?;
+        Value::from("").apply(&rhs, ListOperator::Join, *operator)
+      }
+      Expression::Join {
+        lhs: Some(lhs),
+        operator,
+        rhs,
+      } => {
+        let lhs = self.evaluate_value(lhs)?;
+        let rhs = self.evaluate_value(rhs)?;
+        lhs.apply(&rhs, ListOperator::Join, *operator)
+      }
+      Expression::List { elements, .. } => {
+        let mut values = Vec::new();
+        for element in elements {
+          values.extend(self.evaluate_value(element)?.into_elements());
+        }
+        Ok(values.into())
+      }
+      Expression::Not { operand } => Ok((!self.evaluate_value(operand)?.is_truthy()).into()),
+      Expression::Or { lhs, rhs } => {
+        let lhs = self.evaluate_value(lhs)?;
+        if lhs.is_truthy() {
+          Ok(lhs)
+        } else {
+          self.evaluate_value(rhs)
+        }
+      }
+      Expression::StringLiteral { string_literal } => Ok(string_literal.cooked.deref().into()),
+      Expression::Variable { name, number } => {
+        let Some(number) = number else {
+          return Err(Error::internal(format!(
+            "attempted to evaluate unresolved variable `{name}`"
+          )));
+        };
+
+        if self.non_const_assignments.contains(number) {
+          Err(ConstError::Variable(*name).into())
+        } else if let Some(binding) = self.scope.binding(*number) {
+          Ok(binding.value.clone())
+        } else {
+          Err(Error::internal(format!(
+            "attempted to evaluate unevaluated variable `{name}`"
+          )))
+        }
+      }
+    }
+  }
+
+  fn evaluate_boolean(&self, condition: &Expression<'src>) -> RunResult<'src, bool> {
+    let Expression::Comparison {
+      lhs,
+      operator,
+      rhs,
+      token,
+    } = condition
+    else {
+      return Ok(self.evaluate_value(condition)?.is_truthy());
+    };
+    let condition = match operator {
+      ConditionalOperator::Equality => self.evaluate_value(lhs)? == self.evaluate_value(rhs)?,
+      ConditionalOperator::Inequality => self.evaluate_value(lhs)? != self.evaluate_value(rhs)?,
+      ConditionalOperator::RegexMatch | ConditionalOperator::RegexMismatch => {
+        let lhs = self.evaluate_value(lhs)?;
+        let rhs = self.evaluate_value(rhs)?;
+
+        let regexes = rhs
+          .elements()
+          .iter()
+          .map(|regex| Regex::new(regex))
+          .collect::<Result<Vec<Regex>, regex::Error>>()
+          .map_err(|source| Error::RegexCompile {
+            source,
+            token: *token,
+          })?;
+
+        let matched = lhs
+          .elements()
+          .iter()
+          .any(|element| regexes.iter().any(|regex| regex.is_match(element)));
+
+        match operator {
+          ConditionalOperator::RegexMatch => matched,
+          ConditionalOperator::RegexMismatch => !matched,
+          _ => unreachable!(),
+        }
+      }
+    };
+    Ok(condition)
+  }
+
+  pub(crate) fn run_command(
+    context: &ExecutionContext,
+    env: &BTreeMap<String, String>,
+    scope: &Scope,
+    command: &str,
+    args: Option<&[String]>,
+  ) -> Result<String, OutputError> {
+    assert!(!context.module.settings.skip_commands(context.config));
+
+    let mut cmd = context.module.settings.shell_command(context.config);
+
+    cmd.shell_arg(command);
+
+    if let Some(args) = args {
+      if ShellKind::from(&cmd).takes_shell_name() {
+        cmd.arg(command);
+      }
+
+      cmd.args(args);
+    }
+
+    let environment = Environment::new(
+      context.dotenv,
+      scope,
+      &context.module.settings,
+      &context.module.unexports,
+    );
+
+    environment.export(&mut cmd);
+
+    cmd
+      .current_dir(context.working_directory())
+      .stdin(Stdio::inherit())
+      .stderr(if context.config.verbosity.quiet() {
+        Stdio::null()
+      } else {
+        Stdio::inherit()
+      })
+      .stdout(Stdio::piped());
+
+    for (key, value) in env {
+      cmd.env(key, value);
+    }
+
+    cmd.output_guard_stdout()
+  }
+
   pub(crate) fn evaluate_line(
-    &mut self,
+    &self,
     line: &Line<'src>,
     continued: bool,
   ) -> RunResult<'src, String> {
@@ -213,7 +733,9 @@ impl<'src, 'run> Evaluator<'src, 'run> {
     for (i, fragment) in line.fragments.iter().enumerate() {
       match fragment {
         Fragment::Text { token } => {
-          let lexeme = token.lexeme().replace("{{{{", "{{");
+          let lexeme = token
+            .lexeme()
+            .replace(Lexer::INTERPOLATION_ESCAPE, Lexer::INTERPOLATION_START);
 
           if i == 0 && continued {
             evaluated += lexeme.trim_start();
@@ -222,7 +744,7 @@ impl<'src, 'run> Evaluator<'src, 'run> {
           }
         }
         Fragment::Interpolation { expression } => {
-          evaluated += &self.evaluate_expression(expression)?;
+          evaluated += &self.evaluate_value(expression)?.join();
         }
       }
     }
@@ -230,74 +752,115 @@ impl<'src, 'run> Evaluator<'src, 'run> {
   }
 
   pub(crate) fn evaluate_parameters(
-    config: &'run Config,
-    dotenv: &'run BTreeMap<String, String>,
-    parameters: &[Parameter<'src>],
-    arguments: &[&str],
+    arguments: &[Value],
+    context: &ExecutionContext<'src, 'run>,
+    is_dependency: bool,
+    recipe: &Recipe<'src>,
     scope: &'run Scope<'src, 'run>,
-    settings: &'run Settings,
-    search: &'run Search,
-  ) -> RunResult<'src, (Scope<'src, 'run>, Vec<String>)> {
-    let mut evaluator = Evaluator {
-      assignments: None,
-      scope: scope.child(),
-      search,
-      settings,
-      dotenv,
-      config,
-    };
+  ) -> RunResult<'src, (Scope<'src, 'run>, Vec<String>, BTreeMap<String, String>)> {
+    let mut evaluator = Self::new(
+      context,
+      BTreeMap::new(),
+      is_dependency,
+      Some(recipe.name),
+      scope,
+    );
 
-    let mut scope = scope.child();
+    for attribute in &recipe.attributes {
+      if let Attribute::Env(key, value) = attribute {
+        let context = StringContext::EnvKey(recipe.attributes.name(attribute));
+        let key = evaluator.evaluate_string(key, context)?;
+        let value = evaluator.evaluate_value(value)?;
+        if !value.is_empty() {
+          evaluator.env.insert(key, value.join());
+        }
+      }
+    }
 
     let mut positional = Vec::new();
 
-    let mut rest = arguments;
-    for parameter in parameters {
-      let value = if rest.is_empty() {
-        if let Some(ref default) = parameter.default {
-          let value = evaluator.evaluate_expression(default)?;
-          positional.push(value.clone());
-          value
-        } else if parameter.kind == ParameterKind::Star {
-          String::new()
-        } else {
-          return Err(Error::Internal {
-            message: "missing parameter without default".to_owned(),
-          });
-        }
-      } else if parameter.kind.is_variadic() {
-        for value in rest {
-          positional.push((*value).to_owned());
-        }
-        let value = rest.to_vec().join(" ");
-        rest = &[];
-        value
-      } else {
-        let value = rest[0].to_owned();
-        positional.push(value.clone());
-        rest = &rest[1..];
-        value
-      };
-      scope.bind(parameter.export, parameter.name, value);
+    if arguments.len() != recipe.parameters.len() {
+      return Err(Error::internal("arguments do not match parameter count"));
     }
 
-    Ok((scope, positional))
+    for (parameter, argument) in recipe.parameters.iter().zip(arguments) {
+      let value = if argument.elements().is_empty() {
+        if let Some(default) = &parameter.default {
+          evaluator.evaluate_value(default)?
+        } else if parameter.kind == ParameterKind::Star || parameter.flag {
+          Value::new()
+        } else {
+          return Err(Error::EmptyListArgument {
+            parameter: parameter.name.lexeme(),
+            recipe: recipe.name(),
+          });
+        }
+      } else if let Some(value) = &parameter.value
+        && !evaluator.is_dependency
+      {
+        iter::repeat_n(
+          evaluator.evaluate_value(value)?.elements(),
+          argument.elements().len(),
+        )
+        .flatten()
+        .cloned()
+        .collect()
+      } else {
+        argument.clone()
+      };
+
+      parameter.check_value_count(recipe, &value)?;
+
+      for element in &value {
+        parameter.check_pattern_match(recipe, element)?;
+      }
+
+      if parameter.kind.is_variadic() || parameter.multiple {
+        positional.extend(value.elements().iter().cloned());
+      } else {
+        positional.push(value.join());
+      }
+
+      let value = if evaluator.lists {
+        value
+      } else {
+        value.join().into()
+      };
+
+      evaluator.scope.bind(Binding {
+        attributes: AttributeSet::new(),
+        eager: false,
+        export: parameter.export,
+        file_depth: 0,
+        name: parameter.name,
+        number: parameter.number,
+        prelude: false,
+        private: false,
+        value,
+      });
+    }
+
+    Ok((evaluator.scope, positional, evaluator.env))
   }
 
-  pub(crate) fn recipe_evaluator(
-    config: &'run Config,
-    dotenv: &'run BTreeMap<String, String>,
+  pub(crate) fn new(
+    context: &ExecutionContext<'src, 'run>,
+    env: BTreeMap<String, String>,
+    is_dependency: bool,
+    recipe: Option<Name<'src>>,
     scope: &'run Scope<'src, 'run>,
-    settings: &'run Settings,
-    search: &'run Search,
-  ) -> Evaluator<'src, 'run> {
-    Evaluator {
+  ) -> Self {
+    Self {
       assignments: None,
-      scope: Scope::child(scope),
-      search,
-      settings,
-      dotenv,
-      config,
+      context: Some(*context),
+      env,
+      is_dependency,
+      lists: context.module.settings.lists,
+      non_const_assignments: HashSet::new(),
+      overrides: context.overrides,
+      recipe,
+      recursion_depth: 0,
+      scope: scope.child(),
     }
   }
 }
@@ -325,13 +888,13 @@ mod tests {
 
   run_error! {
     name: export_assignment_backtick,
-    src: r#"
-      export exported_variable := "A"
+    src: "
+      export exported_variable := 'A'
       b := `echo $exported_variable`
 
       recipe:
         echo {{b}}
-    "#,
+    ",
     args: ["--quiet", "recipe"],
     error: Error::Backtick {
         token,

@@ -1,37 +1,56 @@
-use crate::common::*;
+use super::*;
 
-pub fn run() -> Result<(), i32> {
+/// Main entry point into `just`. Parse arguments from `args` and run.
+#[allow(clippy::missing_errors_doc)]
+pub fn run(args: impl Iterator<Item = impl Into<OsString> + Clone>) -> Result<(), i32> {
   #[cfg(windows)]
-  ansi_term::enable_ansi_support().ok();
+  nu_ansi_term::enable_ansi_support().ok();
 
-  env_logger::Builder::from_env(
-    env_logger::Env::new()
-      .filter("JUST_LOG")
-      .write_style("JUST_LOG_STYLE"),
-  )
-  .init();
+  let arguments = Arguments::try_parse_from(args).map_err(|err| {
+    err.print().ok();
+    err.exit_code()
+  })?;
 
-  let app = Config::app();
+  let config = Config::from_arguments(arguments).map_err(Error::from);
 
-  info!("Parsing command line arguments…");
-  let matches = app.get_matches();
+  let (color, verbosity) = config
+    .as_ref()
+    .map(|config| (config.color, config.verbosity))
+    .unwrap_or_default();
 
   let loader = Loader::new();
 
-  let mut color = Color::auto();
-  let mut verbosity = Verbosity::default();
-
-  Config::from_matches(&matches)
-    .map_err(Error::from)
+  config
     .and_then(|config| {
-      color = config.color;
-      verbosity = config.verbosity;
-      config.run(&loader)
+      SignalHandler::install(config.verbosity)?;
+      config.subcommand.execute(&config, &loader)
+    })
+    .or_else(|error| {
+      if error.is_help() {
+        println!("{}", error.color_display(color.stdout()));
+        Ok(())
+      } else {
+        Err(error)
+      }
     })
     .map_err(|error| {
-      if !verbosity.quiet() {
+      if !verbosity.quiet() && error.print_message() {
         eprintln!("{}", error.color_display(color.stderr()));
       }
       error.code().unwrap_or(EXIT_FAILURE)
     })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn run_can_be_called_more_than_once() {
+    let tmp = testing::tempdir();
+    fs::write(tmp.path().join("justfile"), "foo:").unwrap();
+    let search_directory = format!("{}/", tmp.path().to_str().unwrap());
+    run(["just", &search_directory].iter()).unwrap();
+    run(["just", &search_directory].iter()).unwrap();
+  }
 }
